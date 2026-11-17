@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@import "./styles/tokens.css";
+@import "./styles/base.css";
+@import "./styles/layout.css";
+@import "./styles/ui.css";
+@import "./styles/media.css";
+@import "./styles/pages-home.css";
+@import "./styles/pages-create.css";
+@import "./styles/pages-project.css";
+@import "./styles/pages-live.css";
+@import "./styles/pages-campaigns.css";
+@import "./styles/pages-settings.css";
+@import "./styles/responsive.css";
+
+@font-face {
+  font-family: "Poppins";
+  src: url("/fonts/Poppins-ExtraBold.ttf") format("truetype");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Anton";
+  src: url("/fonts/Anton-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Bebas Neue";
+  src: url("/fonts/BebasNeue-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

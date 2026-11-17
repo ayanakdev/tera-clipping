@@ -1,0 +1,62 @@
+:root {
+  color-scheme: light;
+
+  --paper: #f6f4fb;
+  --paper-deep: #efeaf8;
+  --surface: #ffffff;
+  --surface-soft: #fbfaff;
+  --ink: #171120;
+  --ink-2: #3c344a;
+  --muted: #746c84;
+  --muted-2: #9b93a9;
+  --line: #e9e4f2;
+  --line-strong: #dbd3ec;
+
+  --violet-950: #240a52;
+  --violet-900: #2e1065;
+  --violet-800: #4c1d95;
+  --violet-700: #5b21b6;
+  --violet-600: #6d28d9;
+  --violet-500: #7c3aed;
+  --violet-400: #8b5cf6;
+  --violet-300: #b9a4ff;
+  --violet-200: #ddd1ff;
+  --violet-100: #f0e9ff;
+  --violet-50: #f8f5ff;
+
+  --green: #128a55;
+  --green-soft: #e7f8f0;
+  --amber: #b77900;
+  --amber-soft: #fff6df;
+  --red: #d92d3f;
+  --red-soft: #ffeef0;
+
+  --shadow-xs: 0 1px 2px rgba(30, 17, 52, 0.05);
+  --shadow-sm: 0 10px 24px -18px rgba(40, 21, 80, 0.28), 0 1px 2px rgba(30, 17, 52, 0.04);
+  --shadow-md: 0 24px 50px -32px rgba(46, 16, 101, 0.38), 0 2px 8px rgba(30, 17, 52, 0.04);
+  --shadow-lg: 0 44px 90px -40px rgba(30, 10, 70, 0.5), 0 4px 16px rgba(30, 17, 52, 0.06);
+
+  --radius-xs: 8px;
+  --radius-sm: 11px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 28px;
+
+  --font-display: "Space Grotesk Variable", "Space Grotesk", "Inter Variable", sans-serif;
+  --font-body: "Inter Variable", "Inter", system-ui, sans-serif;
+  --font-caption: "Poppins", "Inter Variable", sans-serif;
+
+  --sidebar-width: 248px;
+  --topbar-height: 70px;
+  --page-gutter: clamp(20px, 3.2vw, 44px);
+  --ease-out: cubic-bezier(0.22, 0.8, 0.28, 1);
+}
+
+@theme {
+  --font-display: "Space Grotesk Variable", "Space Grotesk", "Inter Variable", sans-serif;
+  --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  --color-ink: #171120;
+  --color-paper: #f6f4fb;
+  --color-violet: #7c3aed;
+  --color-line: #e9e4f2;
+}

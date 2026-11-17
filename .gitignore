@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Local media, projects, settings and caches. Never commit these.
+data/
+tools/
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Build output
+web/dist/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
