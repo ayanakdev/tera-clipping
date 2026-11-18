@@ -1,4 +1,4 @@
-import type { AppSettings, CaptionPresetId, ClipPresetVisual, HookStyleId } from './types';
+import type { AppSettings, CaptionPresetId, ClipPresetVisual, HookStyleId, ReframeMode } from './types';
 
 export const DEFAULT_SETTINGS: AppSettings = {
   defaultClipCount: 5,
@@ -11,7 +11,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultPacing: 'balanced',
   defaultQuality: 'balanced',
   renderAcceleration: 'auto',
-  defaultReframe: 'smart',
+  defaultReframe: 'auto',
   defaultAiMode: 'smart',
   defaultAsrModel: 'base.en',
   // 0 = let the server pick a thread count for this CPU.
@@ -198,6 +198,14 @@ export const HOOK_STYLES: Array<{
   { id: 'purple', name: 'Purple card', textColor: '#FFFFFF', cardColor: '#6D28D9', description: 'Brand-first attention grab' },
   { id: 'none', name: 'No hook', textColor: '#FFFFFF', cardColor: 'transparent', description: 'Let the first frame speak' },
 ];
+
+export const REFRAME_LABELS: Record<ReframeMode, string> = {
+  auto: 'Auto · notices layout',
+  smart: 'Smart · tracks faces',
+  split: 'Game + cam · stacked',
+  center: 'Centre crop',
+  blur: 'Blur fill',
+};
 
 export const ASPECT_SIZES = {
   '9:16': { width: 1080, height: 1920 },

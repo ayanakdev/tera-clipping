@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   ArrowUpRight,
   Check,
@@ -455,7 +455,7 @@ export function Pipeline({
   );
 }
 
-export function HeatTimeline({
+export const HeatTimeline = memo(function HeatTimeline({
   audioHeat,
   chatHeat,
   moments,
@@ -552,10 +552,12 @@ export function HeatTimeline({
       </div>
     </div>
   );
-}
+});
 
-export function MiniSpark({ points, className }: { points: HeatPoint[]; className?: string }) {
-  const values = points.map((point) => point.heat ?? ((point.audio ?? 0) * 0.6 + (point.chat ?? 0) / 20)).slice(-40);
+export const MiniSpark = memo(function MiniSpark({ points, className }: { points: HeatPoint[]; className?: string }) {
+  const values = points
+    .map((point) => point.heat ?? ((point.audio ?? 0) * 0.6 + (point.chat ?? 0) / 20))
+    .slice(-40);
   if (!values.length) return <span className={cx('mini-spark', className)} aria-hidden />;
   const max = Math.max(0.3, ...values);
   const path = values
@@ -567,7 +569,7 @@ export function MiniSpark({ points, className }: { points: HeatPoint[]; classNam
       <path d={path} fill="none" stroke="#7c3aed" strokeWidth="1.6" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
     </svg>
   );
-}
+});
 
 export function StatusChip({ status }: { status: ProjectStatus }) {
   const tone =

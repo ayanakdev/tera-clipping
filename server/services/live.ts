@@ -12,11 +12,12 @@ import { killTree } from '../lib/process';
 import { store } from '../lib/store';
 import { probeMedia, remuxTsSegments } from './media';
 import { createProject, projectBusy } from './pipeline';
-import { resolveLiveStream, resolveSource } from './ytdlp';
+import { type ResolvedSource, resolveLiveStream, resolveSource } from './ytdlp';
 
 const SEGMENT_SECONDS = 6;
 const TICK_MS = 5_000;
 const MAX_HEAT_POINTS = 720; // one hour at 5s resolution
+const STALL_MS = 25_000; // no new media for this long means the stream copy is dead
 const BASELINE_WINDOW = 48; // 4 minutes
 
 interface Runtime {
@@ -39,6 +40,12 @@ interface Runtime {
   lastAutoClipAt: number;
   lastAutoProjectId: string;
   momentTask: Promise<void> | null;
+  /** Wall-clock anchor used to advance the displayed clock smoothly. */
+  elapsedAnchorAt: number;
+  /** Displayed seconds at the moment of the anchor. */
+  elapsedAnchorValue: number;
+  /** Guards against two reconnect attempts racing each other. */
+  supervising: boolean;
 }
 
 const runtimes = new Map<string, Runtime>();
@@ -91,7 +98,11 @@ function logTo(runtime: Runtime, level: 'info' | 'warn' | 'error', message: stri
 
 function publish(runtime: Runtime, save = false): void {
   runtime.session.updatedAt = stamp();
-  runtime.session.duration = Math.round(runtime.duration * 10) / 10;
+  runtime.duration = Math.round(runtime.duration * 10) / 10;
+  runtime.session.duration = runtime.duration;
+  // One source of truth. Out_time resets and reconnects may disagree, but the
+  // capture clock is monotonic so the timer can never step backwards.
+  runtime.session.elapsed = runtime.duration;
   mirrorHeat(runtime);
   bus.emit('live.updated', { ...runtime.session });
   if (save) void store.saveLiveSession(runtime.session).catch((error) => log.warn('live save failed', error));
@@ -306,12 +317,20 @@ async function maybeAutoClip(runtime: Runtime, moment: LiveMoment): Promise<void
     const previous = await store.getProject(runtime.lastAutoProjectId);
     if (previous && projectBusy(previous.id)) return;
   }
+  // The payoff lands after the surge. Wait for the tail to be on disk instead
+  // of cutting the second chat reacts, which used to clip the answer off.
+  const tail = 24;
+  const deadline = Date.now() + 30_000;
+  while (!runtime.stopping && runtime.duration < moment.t + tail && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+  }
+  if (runtime.stopping) return;
   runtime.lastAutoClipAt = runtime.duration;
 
   const lookback = Math.max(20, Math.min(180, settings.liveLookback || 90));
-  // Give the moment a short tail, then take the lookback window behind it.
-  // This keeps the rewind correction while still ending after the reaction.
-  const endTarget = Math.min(runtime.duration, Math.max(SEGMENT_SECONDS * 2, moment.t + 18));
+  // Take the lookback window behind the moment and keep the tail in front of
+  // it, so the rewind correction still ends after the reaction and its answer.
+  const endTarget = Math.min(runtime.duration, Math.max(SEGMENT_SECONDS * 2, moment.t + tail));
   const complete = segmentFiles(runtime).filter((file) => {
     const start = segmentIndex(file) * SEGMENT_SECONDS;
     return start >= endTarget - lookback && start <= endTarget;
@@ -341,7 +360,13 @@ async function maybeAutoClip(runtime: Runtime, moment: LiveMoment): Promise<void
         // cheap and gives the editor a human-quality pick. Users who turn AI
         // off globally still get a fully local pipeline.
         aiMode: settings.defaultAiMode === 'off' ? 'off' : 'smart',
-        reframe: 'split',
+        // A live auto-clip does not know whether the channel is playing a game
+        // or just chatting to the camera. Notice the layout per moment instead
+        // of assuming gameplay, which used to stack a full-frame cam twice.
+        reframe:
+          settings.defaultReframe === 'center' || settings.defaultReframe === 'blur'
+            ? settings.defaultReframe
+            : 'auto',
         clipCount: Math.max(1, Math.min(3, settings.defaultClipCount)),
       },
     });
@@ -413,8 +438,25 @@ function watchSegments(runtime: Runtime): void {
         }
       }
       runtime.session.bytes = bytes;
-      if (runtime.session.status === 'recording' && Date.now() - runtime.lastStableAt > 20_000) runtime.session.health = 'good';
-      publish(runtime);
+      const staleMs = Date.now() - runtime.lastStableAt;
+      if (runtime.session.status === 'recording') {
+        if (staleMs > STALL_MS && runtime.process) {
+          // ffmpeg can sit on a dead HLS playlist forever: it stays alive, writes
+          // no segments and emits no error, so the recording silently freezes at
+          // a few seconds. Freeze the clock, kill ffmpeg; the close handler
+          // re-resolves a fresh stream URL and reconnects.
+          logTo(runtime, 'warn', `No data for ${Math.round(staleMs / 1000)}s — restarting the recorder.`);
+          runtime.session.health = 'unstable';
+          runtime.elapsedAnchorValue = runtime.duration;
+          runtime.elapsedAnchorAt = Date.now();
+          runtime.lastStableAt = Date.now();
+          killTree(runtime.process.pid);
+        } else if (staleMs > 10_000) {
+          runtime.session.health = 'unstable';
+        } else if (runtime.session.health === 'unstable' && staleMs < 4_000) {
+          runtime.session.health = 'good';
+        }
+      }
       const latest = files[files.length - 1];
       if (latest && segmentIndex(latest) > runtime.analyzedSegment) {
         runtime.segmentQueue = runtime.segmentQueue.then(() => analyzeAudioSegment(runtime, latest)).catch(() => undefined);
@@ -422,10 +464,23 @@ function watchSegments(runtime: Runtime): void {
     }, TICK_MS),
   );
 
+  // A one-second heartbeat keeps the on-screen timer smooth. The wall clock
+  // advances between ffmpeg progress reports; progress can pull it forward but
+  // never backwards, so a reconnect or a reset segment timestamp is invisible.
   runtime.timers.push(
     setInterval(() => {
+      if (runtime.stopping) return;
+      if (runtime.session.status === 'recording') {
+        const wall = runtime.elapsedAnchorValue + (Date.now() - runtime.elapsedAnchorAt) / 1000;
+        runtime.duration = Math.max(runtime.duration, wall);
+      } else {
+        // Reconnecting or finalising: hold the clock steady instead of
+        // counting offline time, then resume from this value.
+        runtime.elapsedAnchorValue = runtime.duration;
+        runtime.elapsedAnchorAt = Date.now();
+      }
       publish(runtime);
-    }, 10_000),
+    }, 1_000),
   );
 
   runtime.timers.push(
@@ -486,29 +541,37 @@ function spawnRecorder(runtime: Runtime, streamUrl: string): void {
   runtime.process = child;
   logTo(runtime, 'info', `Recorder online (segment ${runtime.nextSegmentNumber}).`);
 
-  let stderr = '';
   let lastTime = -1;
   const receiveTime = (seconds: number) => {
     if (!Number.isFinite(seconds) || seconds <= lastTime) return;
     lastTime = seconds;
-    runtime.duration = runtime.baseDuration + seconds;
     runtime.lastStableAt = Date.now();
+    const mediaSeconds = runtime.baseDuration + seconds;
+    // `segment` muxing resets out_time at six-second boundaries. Only trust a
+    // reading when it is genuinely ahead of the clock already on screen, and
+    // re-anchor the wall clock so it keeps advancing from the new value.
+    if (mediaSeconds > runtime.duration + 0.05) {
+      runtime.duration = mediaSeconds;
+      runtime.elapsedAnchorValue = mediaSeconds;
+      runtime.elapsedAnchorAt = Date.now();
+    }
   };
-  // ffmpeg's -progress stream is machine-readable and works even at warning log level.
-  child.stdout?.on('data', (chunk: Buffer) => {
-    for (const line of chunk.toString().split('\n')) {
+  // Only stdout carries -progress data. Parse complete lines with a small
+  // buffer so a chunk boundary in the middle of a line cannot corrupt a value.
+  let progressBuffer = '';
+  const feed = (raw: string) => {
+    progressBuffer += raw;
+    const lines = progressBuffer.split(/\r?\n/);
+    progressBuffer = lines.pop() ?? '';
+    for (const line of lines) {
       const match = line.match(/^out_time_(?:us|ms)=(\d+)/);
       if (match) receiveTime(Number(match[1]) / 1_000_000);
     }
-  });
-  child.stderr?.on('data', (chunk: Buffer) => {
-    stderr = (stderr + chunk.toString()).slice(-4000);
-    const matches = [...stderr.matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
-    const last = matches[matches.length - 1];
-    if (last) {
-      receiveTime(Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3]));
-    }
-  });
+  };
+  child.stdout?.on('data', (chunk: Buffer) => feed(chunk.toString()));
+  // ffmpeg warnings are not part of the clock; consume stderr so the pipe never
+  // fills and blocks the recorder.
+  child.stderr?.resume();
 
   child.on('error', (error) => {
     logTo(runtime, 'error', `Recorder process error: ${error.message}`);
@@ -519,37 +582,70 @@ function spawnRecorder(runtime: Runtime, streamUrl: string): void {
     const files = segmentFiles(runtime);
     runtime.nextSegmentNumber = files.length ? segmentIndex(files[files.length - 1]!) + 1 : runtime.nextSegmentNumber;
     if (runtime.stopping) return;
+    // A new ffmpeg starts out_time at zero, so carry the visible clock forward
+    // before reconnecting. The backoff/retry loop lives in reconnect().
     runtime.baseDuration = runtime.duration;
-    logTo(runtime, 'warn', `Recorder stopped unexpectedly (code ${code}). Reconnecting…`);
-    void supervise(runtime).catch((error) => {
-      logTo(runtime, 'error', `Reconnect failed: ${(error as Error).message}`);
+    runtime.elapsedAnchorValue = runtime.duration;
+    runtime.elapsedAnchorAt = Date.now();
+    logTo(runtime, 'warn', `Recorder stopped (code ${code}). Reconnecting…`);
+    void reconnect(runtime).catch((error: unknown) => {
+      if (runtime.stopping) return;
       runtime.session.status = 'failed';
       runtime.session.health = 'offline';
-      runtime.session.error = (error as Error).message;
+      runtime.session.error = `Reconnect failed: ${(error as Error).message}`;
+      logTo(runtime, 'error', runtime.session.error);
       publish(runtime, true);
     });
   });
 }
 
-async function supervise(runtime: Runtime): Promise<void> {
-  if (runtime.stopping) return;
-  runtime.attempts += 1;
-  runtime.session.status = 'reconnecting';
-  runtime.session.health = 'reconnecting';
-  publish(runtime, true);
-  const wait = Math.min(20_000, 1_500 * 2 ** Math.min(4, runtime.attempts));
-  if (runtime.attempts <= 2) logTo(runtime, 'info', `Reconnecting in ${Math.round(wait / 1000)}s…`);
-  await new Promise((resolve) => setTimeout(resolve, wait));
-  if (runtime.stopping) return;
-  const settings = store.getSettings();
-  const maxHeight = settings.recordQuality === '720p' ? 720 : settings.recordQuality === '1080p' ? 1080 : undefined;
-  const { streamUrl } = await resolveLiveStream(runtime.session.url, settings, undefined, maxHeight);
-  runtime.session.status = 'recording';
-  runtime.session.health = 'unstable';
-  runtime.lastStableAt = Date.now();
-  runtime.attempts = 0;
-  spawnRecorder(runtime, streamUrl);
-  publish(runtime, true);
+/** Re-resolve the stream and restart ffmpeg with capped exponential backoff. */
+async function reconnect(runtime: Runtime): Promise<void> {
+  if (runtime.stopping || runtime.process || runtime.supervising) return;
+  runtime.supervising = true;
+  try {
+    const settings = store.getSettings();
+    const maxHeight = settings.recordQuality === '720p' ? 720 : settings.recordQuality === '1080p' ? 1080 : undefined;
+    for (let attempt = 1; attempt <= 6 && !runtime.stopping; attempt++) {
+      runtime.attempts = attempt;
+      runtime.session.status = 'reconnecting';
+      runtime.session.health = 'unstable';
+      publish(runtime, true);
+      try {
+        const { streamUrl } = await resolveLiveStream(runtime.session.url, settings, undefined, maxHeight);
+        runtime.session.spliceMarker = {
+          at: Math.round(runtime.duration * 10) / 10,
+          kind: 'reconnect',
+          explanation:
+            'The stream dropped and the recorder reconnected. A few seconds around '
+            + 'the cut may be missing, but the elapsed timer keeps moving forward.',
+        };
+        runtime.baseDuration = runtime.duration;
+        runtime.elapsedAnchorValue = runtime.duration;
+        runtime.elapsedAnchorAt = Date.now();
+        runtime.session.status = 'recording';
+        runtime.session.health = 'unstable';
+        runtime.session.error = undefined;
+        runtime.lastStableAt = Date.now();
+        runtime.attempts = 0;
+        // Fresh segment number so a re-keyed tail cannot replay old frames.
+        runtime.nextSegmentNumber += 1;
+        spawnRecorder(runtime, streamUrl);
+        logTo(runtime, 'info', `Recorder reconnected on attempt ${attempt}.`);
+        publish(runtime, true);
+        return;
+      } catch (error) {
+        logTo(runtime, 'warn', `Reconnect attempt ${attempt}/6 failed: ${(error as Error).message}`);
+        if (attempt === 6) throw error;
+        await new Promise<void>((resolve) => {
+          const wait = Math.min(10_000, 800 * 2 ** (attempt - 1));
+          runtime.timers.push(setTimeout(resolve, wait));
+        });
+      }
+    }
+  } finally {
+    runtime.supervising = false;
+  }
 }
 
 // ---------- chat capture ----------
@@ -694,15 +790,17 @@ export interface StartLiveInput {
   url: string;
   title?: string;
   autoClip?: boolean;
+  /** Metadata the caller already resolved, so starting does not re-inspect the link. */
+  info?: ResolvedSource;
 }
 
 export async function startLive(input: StartLiveInput): Promise<LiveSession> {
   if (activeLiveSession()) throw new Error('A live recording is already running. Stop it before starting another.');
   const settings = store.getSettings();
-  const info = await resolveSource(input.url, settings);
+  const info = input.info ?? (await resolveSource(input.url, settings));
   if (!info.isLive) throw new Error('That link is not live right now. Paste the channel URL while the stream is on air.');
   const maxHeight = settings.recordQuality === '720p' ? 720 : settings.recordQuality === '1080p' ? 1080 : undefined;
-  const { streamUrl } = await resolveLiveStream(input.url, settings, undefined, maxHeight);
+  const { streamUrl } = await resolveLiveStream(input.url, settings, undefined, maxHeight, info);
 
   const id = `live_${nanoid(9)}`;
   const dir = path.join(PATHS.live, id);
@@ -750,6 +848,9 @@ export async function startLive(input: StartLiveInput): Promise<LiveSession> {
     lastAutoClipAt: -999,
     lastAutoProjectId: '',
     momentTask: null,
+    elapsedAnchorAt: Date.now(),
+    elapsedAnchorValue: 0,
+    supervising: false,
   };
   runtimes.set(id, runtime);
   await store.saveLiveSession(session);
@@ -836,7 +937,11 @@ export async function stopLive(id: string): Promise<LiveSession> {
     const recording = path.join(runtime.dir, 'recording.mp4');
     await remuxTsSegments(files, path.join(runtime.dir, 'concat.txt'), recording);
     const probe = await probeMedia(recording).catch(() => null);
-    if (probe?.duration) runtime.duration = probe.duration;
+    // Finalisation must never make the visible clock step backwards.
+    if (probe?.duration) runtime.duration = Math.max(runtime.duration, probe.duration);
+    runtime.elapsedAnchorValue = runtime.duration;
+    runtime.elapsedAnchorAt = Date.now();
+    session.elapsed = runtime.duration;
     session.status = 'ready';
     session.health = 'offline';
     session.endedAt = stamp();

@@ -26,7 +26,7 @@ No login. No database. No cloud dashboard. Every project, clip, campaign and cou
 | **Moment finding** | Local transcript analysis, audio-energy peaks, optional Gemini editorial pass, chat-heat boost from live recordings |
 | **Captions** | Word-level timing, six looks: Tera Box (default), Hormozi, Purple Pop, One Word, Neon, Clean — plus a 60–160% size slider per project and per clip. Editable subtitle rows rewrite and re-time the burn-in on save |
 | **Hooks** | Top-centre hook card rendered as a transparent PNG; white, ink or purple cards, or no hook |
-| **Reframing** | YuNet face tracking with smooth alpha-beta crops; smart face crop, game + cam split (gameplay on top, tracked webcam below), centre or blurred backgrounds |
+| **Reframing** | YuNet face tracking with smooth alpha-beta crops. **Auto (default)** notices whether a clip is one full-frame camera or a small cam overlaid on a moving game, then picks smart face crop or the game + cam stacked layout. Smart, game + cam, centre and blurred backgrounds can also be forced |
 | **Live** | 6-second MPEG-TS segments, auto-reconnect, live stream thumbnail, Twitch/Kick chat capture, heat timeline, one-click creator radar |
 | **Campaigns** | Brand briefs, required tags/mentions, submission tracking, payout estimates — all local |
 | **Library** | Per-clip downloads, posters, captions, posting kits, star favourites, multi-select delete, download all and ZIP export |
@@ -82,6 +82,30 @@ The app still starts. Open **Settings → System health → Repair toolkit**, wh
 5. **Reframe.** YuNet finds faces; a smoothed alpha-beta tracker keeps the speaker in frame. Falls back to centre or blurred background when no face is stable.
 6. **Render.** ffmpeg burns in the caption cards (at your chosen size), hook PNG, optional watermark and, only if **Clean up the audio** is on, a gentle loudness match. When **Render speed** is `auto`, it probes Intel Quick Sync, NVIDIA NVENC and AMD AMF once and uses whichever hardware H.264 encoder actually works; any failure silently falls back to `libx264`.
 7. **Keep it.** Everything is written under `data/projects/<id>/`, indexed in `data/index.json`, and served to the UI via `/media/`.
+
+### Story check (does the clip make sense on its own?)
+
+A clip that starts mid-thought is unusable, however strong the moment was. Before a range is scored, the analyser runs the same checklist a human editor would:
+
+1. **Who or what?** The opening line must name the person, item, game, price or situation. A range that opens on "it", "that", "this", "he" or on a bare answer like "$440" is widened backwards until the line it depends on is inside the clip (up to four sentences / 4.5 s away, within the duration cap).
+2. **What is the question?** A question, bet, problem or claim has to be set up inside the range.
+3. **Is it answered?** If the clip raises a question, the answer must also be inside the range. A clip that stops on a question is rejected.
+4. **Does it end cleanly?** The last line has to finish a sentence, and any question the clip raises has to be answered before it stops. A range that ends on "and", "because", "the", "could" or "have" pulls in the next line; a range that ends on (or just before) the answer to its own question runs on to that answer.
+5. **Does anything depend on a missing line?** If a line only works with something said outside the clip, the range is rejected.
+
+Every candidate is scored on `setup`, `resolution` and `ending`; clips that fail are used only to fill a shortfall, never to pad the library. The verdict is written to the clip's **why this clip** line, and the same checklist is sent to Gemini, which is told to reject any id that fails it. Titles and hooks are built from complete spoken lines only — a hard-truncated fragment like "going for flight box to be down on the" is never used as a title.
+
+Live auto-clips wait for a 24 s tail to be recorded instead of clipping the instant chat reacts, so the answer lands inside the window. To inspect a stored project without re-rendering, run `npx tsx scripts/probe-story.ts <projectId>`: it replays the saved transcript through the local analyser and prints what a cold viewer sees at the start and end of each pick.
+
+### Auto framing (smart noticing)
+
+The default **Auto** mode samples a clip before rendering and notices its layout before choosing a crop:
+
+- **One full-frame camera** (IRL, just chatting, a webcam filling the stream) is tracked like **Smart**. The face stays centred in the vertical frame. Nothing is stacked, so the same facecam cannot appear twice.
+- **A corner facecam over a moving game scene** becomes **Game + cam**: the game keeps the top 62% and a tracked crop of the webcam fills the bottom 38%.
+- If no stable face is found, the clip keeps the centre of the frame.
+
+Each clip stores what was noticed (`single cam` or `game + cam`), so an edit re-render reuses the same layout instead of guessing again. Projects rendered before Auto existed can be fixed in one click with **Re-notice framing** on the project page: it switches every finished clip to Auto, re-renders them one by one, and logs the result. Live auto-clips use Auto automatically, whatever the old gameplay-only default was; pick **Centre** or **Blur fill** in Settings to override it. Existing v1 settings are migrated once, and the decision is written to the project log for each clip.
 
 ### Caption size
 

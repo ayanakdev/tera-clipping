@@ -66,11 +66,22 @@ export function friendlyYtdlpError(raw: string, platform: PlatformId): string {
   return 'Could not read this video. Check that the link is public and try again.';
 }
 
+/**
+ * Inspecting a live link costs ~10s (yt-dlp metadata pass). Reading the channel
+ * and then pressing record inspect the same URL twice, so keep the result for a
+ * few seconds. Short enough that liveness cannot go stale in a way that matters:
+ * the stream-URL resolve afterwards still fails loudly if the channel went off.
+ */
+const INSPECT_TTL_MS = 12_000;
+const inspectCache = new Map<string, { at: number; info: ResolvedSource }>();
+
 export async function resolveSource(
   url: string,
   settings: AppSettings,
   signal?: AbortSignal,
 ): Promise<ResolvedSource> {
+  const cached = inspectCache.get(url);
+  if (cached && Date.now() - cached.at < INSPECT_TTL_MS) return cached.info;
   const platform = detectPlatform(url) || 'generic';
   const args = [
     '--no-warnings',
@@ -106,7 +117,7 @@ export async function resolveSource(
     data = data.entries[0] as Record<string, unknown>;
   }
   const isLive = Boolean(data.is_live) || data.live_status === 'is_live' || data.live_status === 'is_upcoming';
-  return {
+  const info: ResolvedSource = {
     url,
     id: String(data.id || ''),
     title: String(data.title || data.fulltitle || data.description?.toString().slice(0, 80) || 'Untitled source'),
@@ -126,6 +137,9 @@ export async function resolveSource(
     embedUrl: String(data.embed_url || ''),
     raw: data,
   };
+  if (inspectCache.size > 24) inspectCache.clear();
+  inspectCache.set(url, { at: Date.now(), info });
+  return info;
 }
 
 function parseDownloadPercent(line: string): number | null {
@@ -236,8 +250,11 @@ export async function resolveLiveStream(
   settings: AppSettings,
   signal?: AbortSignal,
   maxHeight?: number,
+  known?: ResolvedSource,
 ): Promise<{ streamUrl: string; info: ResolvedSource }> {
-  const info = await resolveSource(url, settings, signal);
+  // Callers that already inspected the link hand their result in. A second
+  // `yt-dlp -J` costs several seconds before the recorder can even spawn.
+  const info = known ?? (await resolveSource(url, settings, signal));
   if (!info.isLive) {
     throw new YtDlpError('This channel is not live right now.', 'Use the VOD link instead, or try again when the stream starts.');
   }

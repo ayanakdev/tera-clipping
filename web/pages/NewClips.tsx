@@ -30,7 +30,7 @@ import type {
   ReframeMode,
 } from '@shared/types';
 import { CAPTION_BY_ID } from '@shared/presets';
-import { CAPTION_PRESETS, HOOK_STYLES } from '@shared/presets';
+import { CAPTION_PRESETS, HOOK_STYLES, REFRAME_LABELS } from '@shared/presets';
 import { api, type ResolvedImport } from '@web/lib/api';
 import { bytes, clamp, clock, estimateRenderSeconds, hostOf } from '@web/lib/format';
 import { useAsyncData } from '@web/lib/hooks';
@@ -78,7 +78,7 @@ function toSettings(defaults: Partial<ClipSettings> | undefined): ClipSettings {
     captionScale: defaults?.captionScale ?? 1,
     hookStyle: defaults?.hookStyle ?? 'white',
     pacing: defaults?.pacing ?? 'balanced',
-    reframe: defaults?.reframe ?? 'smart',
+    reframe: defaults?.reframe ?? 'auto',
     quality: defaults?.quality ?? 'balanced',
     aiMode: defaults?.aiMode ?? 'smart',
     asrModel: defaults?.asrModel ?? 'base.en',
@@ -691,27 +691,17 @@ export default function NewClips() {
                     ]}
                   />
                 </Field>
-                <Field
-                  label="Reframing"
-                  hint={
-                    settings.reframe === 'smart'
-                      ? 'tracks faces'
-                      : settings.reframe === 'split'
-                        ? 'game on top, cam below'
-                        : undefined
-                  }
-                >
-                  <Segmented
-                    className="segmented-wide"
+                <Field label="Reframing" hint={settings.reframe === 'auto' ? 'notices the layout' : undefined}>
+                  <Select
                     value={settings.reframe}
                     onChange={(value) => update('reframe', value as ReframeMode)}
-                    options={[
-                      { value: 'smart', label: 'Smart' },
-                      { value: 'split', label: 'Game + cam' },
-                      { value: 'center', label: 'Center' },
-                      { value: 'blur', label: 'Blur fill' },
-                    ]}
-                  />
+                  >
+                    {(Object.keys(REFRAME_LABELS) as ReframeMode[]).map((mode) => (
+                      <option key={mode} value={mode}>
+                        {REFRAME_LABELS[mode]}
+                      </option>
+                    ))}
+                  </Select>
                 </Field>
               </div>
             </div>

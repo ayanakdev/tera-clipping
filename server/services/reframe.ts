@@ -1,4 +1,4 @@
-import type { AspectRatio, FaceSample, ReframeMode } from '../../shared/types';
+import type { AspectRatio, FaceSample, LayoutNotice, ReframeMode } from '../../shared/types';
 import { ASPECT_SIZES } from '../../shared/presets';
 import { PATHS } from '../config';
 import { decodeRgbFrames, type RgbFrame } from './media';
@@ -136,6 +136,8 @@ interface FrameTarget {
   /** normalized face-box height, 0..1 */
   fh: number | null;
   faces: number;
+  /** mean RGB change outside the face boxes since the previous sample, 0..255 */
+  motion: number | null;
 }
 
 export interface ReframeOptions {
@@ -157,6 +159,8 @@ export interface ReframePlan {
   /** Filter chain (without setpts) that produces the output frame size. */
   filter: string;
   faceSamples: FaceSample[];
+  /** Only set for `auto` framing. */
+  notice?: LayoutNotice;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -290,10 +294,38 @@ interface FaceAnalysis {
   ys: number[];
 }
 
-async function detectTargets(opts: ReframeOptions): Promise<FrameTarget[]> {
+/**
+ * Mean pixel change outside the face boxes. A camera panel over a game sits on
+ * a scene that is always moving; a single room camera is mostly still.
+ */
+function frameMotion(previous: Buffer, frame: RgbFrame, detections: Array<{ x: number; y: number; w: number; h: number }>): number {
+  const scaledH = MODEL_SIZE - frame.padY * 2;
+  const boxes = detections.map((face) => ({
+    x0: frame.padX + (face.x * frame.scale) / frame.sourceWidth - 8,
+    y0: frame.padY + (face.y * scaledH) / frame.sourceHeight - 8,
+    x1: frame.padX + ((face.x + face.w) * frame.scale) / frame.sourceWidth + 8,
+    y1: frame.padY + ((face.y + face.h) * scaledH) / frame.sourceHeight + 8,
+  }));
+  const insideFace = (x: number, y: number) =>
+    boxes.some((box) => x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1);
+  let diff = 0;
+  let samples = 0;
+  for (let y = 0; y < frame.height; y += 6) {
+    for (let x = 0; x < frame.width; x += 6) {
+      if (insideFace(x, y)) continue;
+      const i = (y * frame.width + x) * 3;
+      diff += Math.abs(frame.rgb[i]! - previous[i]!) + Math.abs(frame.rgb[i + 1]! - previous[i + 1]!) + Math.abs(frame.rgb[i + 2]! - previous[i + 2]!);
+      samples += 3;
+    }
+  }
+  return samples ? diff / samples : 0;
+}
+
+async function detectTargets(opts: ReframeOptions, measureMotion = false): Promise<FrameTarget[]> {
   const targets: FrameTarget[] = [];
   const estimatedFrames = Math.max(1, Math.ceil(opts.duration * SAMPLE_FPS));
   let anchor: { cx: number; area: number } | null = null;
+  let previous: Buffer | null = null;
 
   try {
     await decodeRgbFrames(opts.sourcePath, {
@@ -307,6 +339,8 @@ async function detectTargets(opts: ReframeOptions): Promise<FrameTarget[]> {
         const detections = await detectFaces(frame);
         const primary = pickPrimary(detections, anchor, opts.sourceWidth);
         if (primary) anchor = { cx: primary.cx, area: primary.w * primary.h };
+        const motion = measureMotion && previous ? frameMotion(previous, frame, detections) : null;
+        if (measureMotion) previous = Buffer.from(frame.rgb);
         targets.push({
           t: frame.t - opts.start,
           cx: primary?.cx ?? null,
@@ -314,6 +348,7 @@ async function detectTargets(opts: ReframeOptions): Promise<FrameTarget[]> {
           fw: primary ? primary.w / opts.sourceWidth : null,
           fh: primary ? primary.h / opts.sourceHeight : null,
           faces: detections.length,
+          motion,
         });
         opts.onProgress?.(Math.min(1, targets.length / estimatedFrames));
       },
@@ -323,6 +358,58 @@ async function detectTargets(opts: ReframeOptions): Promise<FrameTarget[]> {
     console.warn('[reframe] face sampling failed, using centre crop:', (error as Error).message);
   }
   return targets;
+}
+
+/**
+ * Decide whether a clip is one full-frame camera or a small cam overlaid on a
+ * moving game. Full-frame streamers sit near the middle; a game cam lives in a
+ * corner. This is what stops a just-chatting stream from being stacked twice.
+ */
+function noticeLayout(targets: FrameTarget[], sourceWidth: number): LayoutNotice {
+  const faceTargets = targets.filter((target) => target.cx !== null);
+  if (!faceTargets.length) {
+    return {
+      kind: 'no-face',
+      mode: 'smart',
+      confidence: 0,
+      reason: 'No stable face was found, so the clip keeps the centre of the frame.',
+    };
+  }
+  const coverage = faceTargets.length / Math.max(1, targets.length);
+  const widths = faceTargets
+    .map((target) => target.fw)
+    .filter((width): width is number => width !== null && Number.isFinite(width));
+  const medianWidth = median(widths) ?? 0;
+  const outer = faceTargets.filter((target) => {
+    const cx = target.cx! / sourceWidth;
+    return cx < 0.33 || cx > 0.67;
+  }).length;
+  const outerRatio = outer / faceTargets.length;
+  const motions = targets
+    .map((target) => target.motion)
+    .filter((motion): motion is number => motion !== null && Number.isFinite(motion));
+  const medianMotion = median(motions) ?? 0;
+
+  const smallFace = coverage >= 0.55 && medianWidth <= 0.22;
+  const cornerFace = outerRatio >= 0.55;
+  // A full-frame camera can sit off-centre and still be the only thing on
+  // screen. Require measurable motion *outside* the face before calling it a
+  // game + cam layout, otherwise an IRL stream gets stacked twice.
+  const movingScene = medianMotion >= 7;
+  if (smallFace && cornerFace && movingScene) {
+    return {
+      kind: 'game-cam',
+      mode: 'split',
+      confidence: Math.round(Math.min(1, outerRatio * 0.7 + Math.min(1, medianMotion / 18) * 0.3) * 100) / 100,
+      reason: 'Noticed a small corner facecam over a moving scene — stacking game and cam.',
+    };
+  }
+  return {
+    kind: 'single-cam',
+    mode: 'smart',
+    confidence: Math.round(Math.min(1, (1 - outerRatio) * 0.75 + (1 - Math.min(1, medianMotion / 18)) * 0.25) * 100) / 100,
+    reason: 'Noticed one full-frame camera — cropping to the face instead of stacking a duplicate.',
+  };
 }
 
 function smoothTargets(
@@ -556,6 +643,25 @@ function blurFilter(outputWidth: number, outputHeight: number): string {
   ].join(';');
 }
 
+function splitPlan(opts: ReframeOptions, targets: FrameTarget[], notice?: LayoutNotice): ReframePlan {
+  const topHeight = Math.round(opts.outputHeight * SPLIT_TOP_RATIO);
+  const bottomHeight = opts.outputHeight - topHeight;
+  const gameGeometry = geometryForRatio(opts.sourceWidth, opts.sourceHeight, opts.outputWidth / topHeight);
+  const camGeometry = camGeometryForTargets(
+    opts.sourceWidth,
+    opts.sourceHeight,
+    targets,
+    opts.outputWidth / bottomHeight,
+  );
+  const tracked = smoothTargets(targets, camGeometry, opts, 0.14);
+  return {
+    mode: 'split',
+    filter: splitFilter(gameGeometry, camGeometry, tracked.times, tracked.xs, tracked.ys, opts.outputWidth, opts.outputHeight),
+    faceSamples: tracked.faceSamples,
+    notice,
+  };
+}
+
 export async function planReframe(opts: ReframeOptions): Promise<ReframePlan> {
   const geometry = geometryFor(opts.sourceWidth, opts.sourceHeight, opts.aspect);
 
@@ -563,26 +669,37 @@ export async function planReframe(opts: ReframeOptions): Promise<ReframePlan> {
     return { mode: 'blur', filter: blurFilter(opts.outputWidth, opts.outputHeight), faceSamples: [] };
   }
 
+  if (opts.mode === 'auto') {
+    if (opts.sourceWidth <= 16 || opts.sourceHeight <= 16) {
+      return {
+        mode: 'center',
+        filter: centreFilter(geometry, opts.outputWidth, opts.outputHeight),
+        faceSamples: [],
+        notice: {
+          kind: 'no-face',
+          mode: 'smart',
+          confidence: 0,
+          reason: 'This source is too small to inspect, so the clip keeps the centre of the frame.',
+        },
+      };
+    }
+    const targets = await detectTargets(opts, true);
+    const notice = noticeLayout(targets, opts.sourceWidth);
+    if (notice.mode === 'split') return splitPlan(opts, targets, notice);
+    const analysis = smoothTargets(targets, geometry, opts);
+    return {
+      mode: 'smart',
+      filter: cropFilter(geometry, analysis.times, analysis.xs, analysis.ys, opts.outputWidth, opts.outputHeight),
+      faceSamples: analysis.faceSamples,
+      notice,
+    };
+  }
+
   if (opts.mode === 'split') {
     if (opts.sourceWidth <= 16 || opts.sourceHeight <= 16) {
       return { mode: 'center', filter: centreFilter(geometry, opts.outputWidth, opts.outputHeight), faceSamples: [] };
     }
-    const topHeight = Math.round(opts.outputHeight * SPLIT_TOP_RATIO);
-    const bottomHeight = opts.outputHeight - topHeight;
-    const gameGeometry = geometryForRatio(opts.sourceWidth, opts.sourceHeight, opts.outputWidth / topHeight);
-    const targets = await detectTargets(opts);
-    const camGeometry = camGeometryForTargets(
-      opts.sourceWidth,
-      opts.sourceHeight,
-      targets,
-      opts.outputWidth / bottomHeight,
-    );
-    const tracked = smoothTargets(targets, camGeometry, opts, 0.14);
-    return {
-      mode: 'split',
-      filter: splitFilter(gameGeometry, camGeometry, tracked.times, tracked.xs, tracked.ys, opts.outputWidth, opts.outputHeight),
-      faceSamples: tracked.faceSamples,
-    };
+    return splitPlan(opts, await detectTargets(opts));
   }
 
   if (opts.mode === 'center') {

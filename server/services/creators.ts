@@ -179,7 +179,7 @@ async function checkYouTube(creator: CreatorProfile, checkedAt: string): Promise
   if (!response.ok) throw new Error(`YouTube returned ${response.status}.`);
   const html = await response.text();
   // `isLive` is also present on ended live VODs; only `isLiveNow` means on air.
-  if (!/"isLiveNow":true/.test(html)) {
+  if (!/"isLiveNow"\s*:\s*true/.test(html)) {
     const channelName = html.match(/"ownerChannelName":"([^"]+)"/)?.[1];
     return {
       live: false,
@@ -360,10 +360,24 @@ export async function recordCreator(id: string, autoClip = true): Promise<LiveSe
   if (!creator) throw new Error('Creator not found.');
   const status = await checkCreator(creator, true);
   if (!status.live) throw new Error(`${creator.name} is not live right now.`);
+  const url = creatorLiveUrl(creator.platform, creator.handle);
+  const title = status.title || `${creator.name} live`;
   return startLive({
-    url: creatorLiveUrl(creator.platform, creator.handle),
-    title: status.title || `${creator.name} live`,
+    url,
+    title,
     autoClip,
+    // The live check above already proved the channel is on air; reuse it so
+    // starting does not spend another yt-dlp metadata pass on the same link.
+    info: {
+      url,
+      title,
+      channel: status.displayName || creator.name,
+      duration: 0,
+      thumbnail: status.thumbnailUrl,
+      platform: creator.platform,
+      isLive: true,
+      liveStatus: 'is_live',
+    },
   });
 }
 

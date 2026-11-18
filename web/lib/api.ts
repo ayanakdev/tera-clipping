@@ -193,6 +193,8 @@ export const api = {
   cancelProject: (id: string) => request<{ cancelled: boolean }>(`/api/projects/${id}/cancel`, json({})),
   replanProject: (id: string, settings?: Partial<ClipSettings>) =>
     request<Project>(`/api/projects/${id}/replan`, json({ settings })),
+  renoticeProject: (id: string) =>
+    request<{ queued: number }>(`/api/projects/${id}/renotice`, json({})),
 
   updateClip: (projectId: string, clipId: string, body: ClipPatch) =>
     request<ClipRecord>(`/api/projects/${projectId}/clips/${clipId}`, patch(body)),

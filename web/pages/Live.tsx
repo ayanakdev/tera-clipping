@@ -81,7 +81,7 @@ function storageRate(totalBytes: number, seconds: number): string {
 export default function Live() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const { settings: appSettings, notify, confirm } = useApp();
+  const { settings: appSettings, notify, confirm, connected } = useApp();
 
   const load = useCallback(() => api.live(), []);
   const { data, loading, reload } = useAsyncData(load, {
@@ -111,15 +111,17 @@ export default function Live() {
   const lookback = appSettings?.liveLookback ?? 90;
   const chatLag = appSettings?.liveChatLag ?? 14;
 
+  // A real clock, not a counter: setInterval drifts and browsers throttle it,
+  // so use Date.now() and reconcile with the server's monotonic elapsed.
   useEffect(() => {
     if (!active) return;
-    const timer = window.setInterval(() => setTick(Date.now()), 1000);
-    return () => window.clearInterval(timer);
+    const id = window.setInterval(() => setTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
   }, [active?.id]);
 
-  // SSE can silently stall (sleeping tab, flaky proxy, idle connection reset).
-  // While a recording is live, poll the session as a safety net so bytes,
-  // segments, heat and moments keep updating even if no event arrives.
+  // SSE pushes live state as it changes. As a safety net when the connection
+  // sleeps or stalls, poll the session every 3s while a recording is live so
+  // bytes, segments, heat and moments stay current.
   useEffect(() => {
     if (!isRecording(active)) return;
     const refresh = () => {
@@ -138,7 +140,7 @@ export default function Live() {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', onOnline);
     };
-  }, [active?.id, active?.status, reload]);
+  }, [active?.id, active?.status, reload, connected]);
 
   const resolve = useCallback(
     async (raw?: string) => {
@@ -169,11 +171,20 @@ export default function Live() {
     void resolve(initialUrl);
   }, [initialUrl, resolve]);
 
+  const shownElapsed = useRef(0);
+  useEffect(() => {
+    shownElapsed.current = 0;
+  }, [active?.id]);
+
   const elapsed = useMemo(() => {
     if (!active) return 0;
-    const updated = new Date(active.updatedAt).getTime();
+    const base = Math.max(0, active.elapsed ?? active.duration ?? 0);
+    const updated = Date.parse(active.updatedAt);
     const drift = Number.isFinite(updated) ? Math.max(0, (tick - updated) / 1000) : 0;
-    return Math.max(0, active.duration + drift);
+    // Clamp to the highest value we have ever shown for this session. A stale
+    // SSE snapshot, a reconnect or a stop-time probe can never rewind the timer.
+    shownElapsed.current = Math.max(shownElapsed.current, base + drift);
+    return shownElapsed.current;
   }, [active, tick]);
 
   const platformInfo = active ? PLATFORM_BY_ID[active.platform] : null;
@@ -355,6 +366,11 @@ export default function Live() {
                 {clock(elapsed, true)}
                 <small>captured</small>
               </div>
+              {active.spliceMarker ? (
+                <p className="rec-splice-note" title={active.spliceMarker.explanation}>
+                  <WifiOff size={12} /> Reconnected at {clock(active.spliceMarker.at, true)} · a few seconds may be missing.
+                </p>
+              ) : null}
 
               <div className="rec-health-row">
                 <span className="rec-health">

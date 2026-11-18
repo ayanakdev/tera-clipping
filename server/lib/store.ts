@@ -54,8 +54,10 @@ function seedCreatorProfiles(): CreatorProfile[] {
   }));
 }
 
+const INDEX_VERSION = 2;
+
 const EMPTY_INDEX = (): IndexFile => ({
-  version: 1,
+  version: INDEX_VERSION,
   createdAt: new Date().toISOString(),
   settings: { ...DEFAULT_SETTINGS },
   projects: [],
@@ -98,6 +100,7 @@ class Store {
     try {
       const raw = await fsp.readFile(PATHS.index, 'utf8');
       const parsed = JSON.parse(raw) as Partial<IndexFile>;
+      const previousVersion = Number(parsed.version) || 1;
       this.index = {
         ...EMPTY_INDEX(),
         ...parsed,
@@ -110,6 +113,13 @@ class Store {
         studio: { ...EMPTY_STUDIO(), ...(parsed.studio || {}) },
         creators: Array.isArray(parsed.creators) ? parsed.creators : seedCreatorProfiles(),
       };
+      // v2 replaced the stock "smart" default with "auto": notice whether the
+      // source is a game + cam or one full-frame camera before cropping.
+      if (previousVersion < 2 && this.index.settings.defaultReframe === 'smart') {
+        this.index.settings.defaultReframe = 'auto';
+        log.info('settings migrated: framing now notices the stream layout');
+      }
+      this.index.version = INDEX_VERSION;
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         log.error('index.json is unreadable; starting with a fresh index', error);
@@ -240,15 +250,15 @@ class Store {
   }
 
   /** Lifetime counters survive clip/project deletion because they live in index.json. */
-  async recordStudio(delta: Partial<Omit<StudioStats, 'updatedAt'>>): Promise<StudioStats> {
+  async recordStudio(delta: Partial<Omit<StudioStats, 'updatedAt' | 'spliceMarker'>>): Promise<StudioStats> {
     const next = { ...this.index.studio };
-    const keys: Array<keyof Omit<StudioStats, 'updatedAt'>> = [
+    const keys = [
       'projectsCreated',
       'clipsPlanned',
       'rendersCompleted',
       'secondsRendered',
       'liveSecondsCaptured',
-    ];
+    ] as const;
     for (const key of keys) {
       const add = delta[key];
       if (!add) continue;

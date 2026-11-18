@@ -32,9 +32,10 @@ import { downloadSource } from './ytdlp';
 
 const jobs = new Map<string, { controller: AbortController; kind: 'pipeline' | 'clip'; startedAt: number }>();
 const saveMarks = new Map<string, number>();
+const renoticing = new Set<string>();
 
 export function projectBusy(projectId: string): boolean {
-  return jobs.has(projectId);
+  return jobs.has(projectId) || renoticing.has(projectId);
 }
 
 export function projectJobKind(projectId: string): 'pipeline' | 'clip' | undefined {
@@ -447,6 +448,7 @@ async function runPipeline(projectId: string, signal: AbortSignal): Promise<void
       });
       clip.files = result.files;
       clip.faceSamples = result.faceSamples;
+      clip.notice = result.notice;
       clip.status = 'ready';
       clip.stage = 'ready';
       clip.progress = 100;
@@ -454,6 +456,7 @@ async function runPipeline(projectId: string, signal: AbortSignal): Promise<void
       clip.renderMs = result.renderMs;
       rendered += 1;
       void store.recordStudio({ rendersCompleted: 1, secondsRendered: clip.duration });
+      if (result.notice) projectLog(project, 'info', `Clip ${i + 1}: ${result.notice.reason}`);
       projectLog(project, 'info', `Clip ${i + 1} ready in ${(result.renderMs / 1000).toFixed(1)}s.`);
       bus.emit('clip.updated', { projectId: project.id, clip: { ...clip } });
       await persist(project, true);
@@ -624,6 +627,7 @@ export async function editClip(
     clip.transcript = clip.words.map((word) => word.text).join(' ');
     clip.duration = Math.round((clip.end - clip.start) * 100) / 100;
     clip.faceSamples = undefined;
+    clip.notice = undefined;
   }
   if (patch.title !== undefined) clip.title = patch.title.slice(0, 120);
   if (patch.hook !== undefined) clip.hook = patch.hook.slice(0, 120);
@@ -644,6 +648,7 @@ export async function editClip(
   if (patch.framing !== undefined) {
     clip.framing = patch.framing;
     clip.faceSamples = undefined;
+    clip.notice = undefined;
   }
   if (patch.starred !== undefined) clip.starred = patch.starred;
 
@@ -707,6 +712,7 @@ export async function editClip(
     });
     clip.files = result.files;
     clip.faceSamples = result.faceSamples;
+    if (result.notice) clip.notice = result.notice;
     clip.status = 'ready';
     clip.stage = 'ready';
     clip.progress = 100;
@@ -781,13 +787,82 @@ export async function deleteClip(projectId: string, clipId: string): Promise<voi
 
 /** Re-plan clips from the cached transcript without re-downloading or re-transcribing. */
 export async function replanProject(projectId: string, settings?: Partial<ClipSettings>): Promise<Project> {
-  if (jobs.has(projectId)) throw new Error('This project is busy.');
+  if (projectBusy(projectId)) throw new Error('This project is busy.');
   const project = await store.getProject(projectId);
   if (!project) throw new Error('Project not found');
   if (settings) project.settings = resolveSettings({ ...project.settings, ...settings });
   await store.saveProject(project);
   startProject(projectId);
   return project;
+}
+
+/**
+ * Re-check the layout of every finished clip with Auto framing and re-render it.
+ * Projects made before Auto existed (or with a forced split) get their duplicate
+ * facecam panels replaced with a single tracked crop.
+ */
+export async function renoticeProject(projectId: string): Promise<{ queued: number }> {
+  if (projectBusy(projectId)) throw new Error('This project is busy.');
+  const project = await store.getProject(projectId);
+  if (!project) throw new Error('Project not found');
+  const clips = project.clips.filter((clip) => clip.status === 'ready');
+  if (!clips.length) throw new Error('There are no finished clips to re-notice yet.');
+
+  renoticing.add(projectId);
+  project.settings.reframe = 'auto';
+  projectLog(
+    project,
+    'info',
+    `Re-noticing framing for ${clips.length} clip${clips.length === 1 ? '' : 's'} with Auto…`,
+  );
+  await store.saveProject(project);
+  bus.emit('project.updated', store.summarize(project));
+
+  void (async () => {
+    const waitForIdle = async () => {
+      const deadline = Date.now() + 15 * 60_000;
+      while (jobs.has(projectId) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    };
+    try {
+      for (const clip of clips) {
+        await waitForIdle();
+        const fresh = await store.getProject(projectId);
+        const target = fresh?.clips.find((item) => item.id === clip.id);
+        if (!fresh || !target || target.status !== 'ready') continue;
+        try {
+          await editClip(projectId, clip.id, { framing: 'auto' }, 'always');
+        } catch (error) {
+          log.error(`re-notice failed ${clip.id}`, error);
+          projectLog(
+            fresh,
+            'warn',
+            `Clip ${clip.index + 1} could not be re-noticed: ${(error as Error).message}`,
+          );
+          await store.saveProject(fresh);
+        }
+      }
+      await waitForIdle();
+      const done = await store.getProject(projectId);
+      if (!done) return;
+      const single = done.clips.filter((clip) => clip.notice?.kind === 'single-cam').length;
+      const split = done.clips.filter((clip) => clip.notice?.kind === 'game-cam').length;
+      projectLog(done, 'info', `Framing re-noticed: ${single} single cam, ${split} game + cam.`);
+      await store.saveProject(done);
+      bus.emit('project.updated', store.summarize(done));
+      bus.emit('toast', {
+        id: nanoid(8),
+        tone: 'success',
+        title: 'Framing re-noticed',
+        message: `${done.clips.length} clip${done.clips.length === 1 ? '' : 's'} rendered with Auto.`,
+      });
+    } finally {
+      renoticing.delete(projectId);
+    }
+  })();
+
+  return { queued: clips.length };
 }
 
 /** Mark work that was cut off by a server restart so the UI never shows a ghost job. */

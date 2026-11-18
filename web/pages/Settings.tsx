@@ -435,6 +435,7 @@ export default function Settings() {
                   value={form.defaultReframe}
                   onChange={(value) => set('defaultReframe', value as AppSettings['defaultReframe'])}
                 >
+                  <option value="auto">Auto · notice the layout</option>
                   <option value="smart">Smart · tracks faces</option>
                   <option value="split">Gameplay + cam · stacked</option>
                   <option value="center">Center crop</option>

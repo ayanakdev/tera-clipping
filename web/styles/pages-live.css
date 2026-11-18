@@ -155,6 +155,15 @@
   margin-left: 7px;
 }
 
+.rec-splice-note {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
 .rec-health-row {
   display: flex;
   flex-wrap: wrap;

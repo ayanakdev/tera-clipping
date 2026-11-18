@@ -15,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  ScanFace,
   Sparkles,
   Square,
   Trash2,
@@ -30,7 +31,7 @@ import type {
   ReframeMode,
   SubtitleCue,
 } from '@shared/types';
-import { CAPTION_BY_ID, CAPTION_PRESETS, HOOK_STYLES } from '@shared/presets';
+import { CAPTION_BY_ID, CAPTION_PRESETS, HOOK_STYLES, REFRAME_LABELS } from '@shared/presets';
 import { cuesFromWords } from '@shared/utils';
 import { api, mediaUrl, type ClipPatch } from '@web/lib/api';
 import { clock, shortDate, timeAgo } from '@web/lib/format';
@@ -219,6 +220,24 @@ export default function ProjectPage() {
     }
   };
 
+  const renotice = async () => {
+    if (!project) return;
+    setBusyAction('renotice');
+    try {
+      const { queued } = await api.renoticeProject(project.id);
+      notify({
+        tone: 'info',
+        title: 'Re-noticing framing',
+        message: `${queued} clip${queued === 1 ? '' : 's'} will re-render with Auto layout.`,
+      });
+      void reload(true);
+    } catch (cause) {
+      notify({ tone: 'error', title: 'Could not re-notice framing', message: (cause as Error).message });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const retryClip = async (clip: ClipRecord) => {
     try {
       await api.renderClip(id, clip.id);
@@ -274,6 +293,7 @@ export default function ProjectPage() {
   );
 
   const readyClips = project?.clips.filter((clip) => clip.status === 'ready') ?? [];
+  const clipRendering = project?.clips.some((clip) => clip.status === 'rendering') ?? false;
   const totalWords = project?.stats?.words ?? 0;
   const campaignName = project?.campaignId ? 'Campaign linked' : 'Personal clips';
 
@@ -388,6 +408,16 @@ export default function ProjectPage() {
           </Button>
           <Button variant="secondary" icon={Wand2} onClick={openReplan} disabled={isActive(project)}>
             Find new moments
+          </Button>
+          <Button
+            variant="secondary"
+            icon={ScanFace}
+            loading={busyAction === 'renotice'}
+            disabled={isActive(project) || clipRendering || !readyClips.length}
+            onClick={() => void renotice()}
+            title="Re-check every clip's layout and re-render it with Auto framing"
+          >
+            Re-notice framing
           </Button>
           {project.status === 'failed' || project.status === 'cancelled' ? (
             <Button variant="secondary" icon={RefreshCw} loading={busyAction === 'retry'} onClick={() => void retry()}>
@@ -595,7 +625,7 @@ export default function ProjectPage() {
             </div>
             <div className="fact-row">
               <span className="fact-label">Reframing</span>
-              <span className="fact-value">{project.settings.reframe}</span>
+              <span className="fact-value">{REFRAME_LABELS[project.settings.reframe] ?? project.settings.reframe}</span>
             </div>
             <div className="fact-row">
               <span className="fact-label">Speech model</span>
@@ -1008,7 +1038,11 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
             <ScoreBadge score={clip.score} />
             <Badge tone="neutral">{clock(editLength)}</Badge>
             <Badge tone="violet">{preset.name}</Badge>
-            <Badge tone="neutral">{form.framing}</Badge>
+            <Badge tone="neutral">
+              {form.framing === 'auto'
+                ? `Auto · ${clip.notice?.mode === 'split' ? 'game + cam' : clip.notice ? 'single cam' : 'noticing'}`
+                : REFRAME_LABELS[form.framing] ?? form.framing}
+            </Badge>
           </div>
           <div className="editor-details">
             <div className="editor-detail">
@@ -1278,18 +1312,23 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
                   })}
                 </div>
               </Field>
-              <Field label="Reframing">
-                <Segmented
-                  className="segmented-wide"
-                  value={form.framing}
-                  onChange={(value) => set('framing', value as ReframeMode)}
-                  options={[
-                    { value: 'smart', label: 'Smart' },
-                    { value: 'split', label: 'Game + cam' },
-                    { value: 'center', label: 'Center' },
-                    { value: 'blur', label: 'Blur fill' },
-                  ]}
-                />
+              <Field
+                label="Reframing"
+                hint={
+                  form.framing === 'auto' && clip.notice
+                    ? clip.notice.mode === 'split'
+                      ? 'noticed game + cam'
+                      : 'noticed one camera'
+                    : undefined
+                }
+              >
+                <Select value={form.framing} onChange={(value) => set('framing', value as ReframeMode)}>
+                  {(Object.keys(REFRAME_LABELS) as ReframeMode[]).map((mode) => (
+                    <option key={mode} value={mode}>
+                      {REFRAME_LABELS[mode]}
+                    </option>
+                  ))}
+                </Select>
               </Field>
               {form.hookStyle !== 'none' ? (
                 <ClipStagePreview

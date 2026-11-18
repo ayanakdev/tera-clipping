@@ -19,11 +19,23 @@ export type CaptionPresetId = 'tera-box' | 'hormozi' | 'purple-pop' | 'beast' | 
 export type HookStyleId = 'white' | 'black' | 'purple' | 'none';
 
 /**
+ * `auto` notices the stream layout first: a full-frame camera is tracked like
+ * `smart`, while a small cam overlaid on a moving game scene becomes `split`.
  * `smart` tracks the primary face and crops to it. `split` keeps the full
  * gameplay frame on top and adds a tracked face-camera crop underneath, which
  * is the layout most stream clips use on Shorts/TikTok/Reels.
  */
-export type ReframeMode = 'smart' | 'split' | 'center' | 'blur';
+export type ReframeMode = 'auto' | 'smart' | 'split' | 'center' | 'blur';
+
+/** What `auto` framing noticed about the source, kept for the UI and re-renders. */
+export interface LayoutNotice {
+  kind: 'single-cam' | 'game-cam' | 'no-face';
+  /** The concrete layout that was used. */
+  mode: Exclude<ReframeMode, 'auto'>;
+  /** 0–1; higher means the corner-cam/static-scene signal was clearer. */
+  confidence: number;
+  reason: string;
+}
 
 export type PacingMode = 'original' | 'balanced' | 'tight';
 
@@ -203,6 +215,8 @@ export interface ClipRecord {
   captionScale?: number;
   hookStyle: HookStyleId;
   framing: ReframeMode;
+  /** Result of `auto` framing; also tells a re-render which layout to reuse. */
+  notice?: LayoutNotice;
   files: ClipFiles;
   faceSamples?: FaceSample[];
   removedSilence?: number;
@@ -353,6 +367,22 @@ export interface LiveSession {
   error?: string;
   log: Array<{ t: string; level: 'info' | 'warn' | 'error'; message: string }>;
   updatedAt: string;
+  /**
+   * Monotonic capture clock the web renders. It is advanced only by the server
+   * capture loop and is the single source of truth for the on-screen timer, so
+   * a reconnect can never make the displayed time step backwards.
+   */
+  elapsed?: number;
+  /**
+   * Set whenever the capture loop discovers the stream was interrupted and
+   * ffmpeg re-encoded/resumed from a discontinuity. The web surfaces this so
+   * the user knows why a few seconds may rewind at the cut point.
+   */
+  spliceMarker?: {
+    at: number;
+    kind: 'reconnect' | 'gap';
+    explanation: string;
+  };
 }
 
 export interface StudioStats {

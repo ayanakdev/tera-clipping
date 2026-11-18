@@ -35,6 +35,7 @@ import {
   editClip,
   projectBusy,
   recoverInterruptedProjects,
+  renoticeProject,
   replanProject,
   startProject,
 } from './services/pipeline';
@@ -72,9 +73,24 @@ const HOOK_IDS = new Set(HOOK_STYLES.map((style) => style.id));
 const AI_MODES = new Set(['smart', 'full', 'off']);
 const PACING = new Set(['original', 'balanced', 'tight']);
 const QUALITY = new Set(['fast', 'balanced', 'high']);
-const REFRAME = new Set(['smart', 'split', 'center', 'blur']);
+const REFRAME = new Set(['auto', 'smart', 'split', 'center', 'blur']);
 const ASR = new Set(['base.en', 'base', 'small.en', 'tiny.en']);
 const PLATFORM_IDS = new Set(PLATFORMS.map((platform) => platform.id));
+
+/**
+ * Service code signals user-facing failures with plain Errors (not live, busy,
+ * bad link). Those are not server faults, so they must not surface as a 500.
+ */
+async function asHttp<T>(task: () => Promise<T>, fallback = 400): Promise<T> {
+  try {
+    return await task();
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    const message = (error as Error)?.message || 'That request could not be completed.';
+    const busy = /already (running|working|busy)|is busy|already on your/i.test(message);
+    throw new HttpError(busy ? 409 : fallback, message);
+  }
+}
 
 function number(value: unknown): number | undefined {
   const parsed = typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : NaN;
@@ -435,7 +451,7 @@ function registerRoutes(app: FastifyInstance): void {
 
   app.post('/api/import/resolve', async (request) => {
     const url = normalizeUrl((request.body as { url?: unknown })?.url);
-    const info = await resolveSource(url, store.getSettings());
+    const info = await asHttp(() => resolveSource(url, store.getSettings()));
     const platform = info.platform || detectPlatform(url) || 'generic';
     return {
       url,
@@ -459,7 +475,7 @@ function registerRoutes(app: FastifyInstance): void {
   app.post('/api/projects', async (request) => {
     const body = (request.body || {}) as Record<string, unknown>;
     const url = normalizeUrl(body.url);
-    const info = await resolveSource(url, store.getSettings());
+    const info = await asHttp(() => resolveSource(url, store.getSettings()));
     if (info.isLive) throw new HttpError(400, 'That channel is live. Use the Live page to record it first.');
     const platform = platformFrom(body.platform, info.platform);
     const project = await createProject({
@@ -564,8 +580,13 @@ function registerRoutes(app: FastifyInstance): void {
   app.post('/api/projects/:id/replan', async (request) => {
     const { id } = request.params as { id: string };
     const settings = cleanSettings((request.body as { settings?: unknown } | undefined)?.settings);
-    const project = await replanProject(id, settings);
+    const project = await asHttp(() => replanProject(id, settings), 409);
     return project;
+  });
+  app.post('/api/projects/:id/renotice', async (request) => {
+    const { id } = request.params as { id: string };
+    if (projectBusy(id)) throw new HttpError(409, 'This project is already working.');
+    return renoticeProject(id);
   });
   app.patch('/api/projects/:id/clips/:clipId', async (request) => {
     const { id, clipId } = request.params as { id: string; clipId: string };
@@ -868,7 +889,7 @@ function registerRoutes(app: FastifyInstance): void {
   app.post('/api/creators/refresh', async () => ({ creators: await creatorsWithStatus(true) }));
   app.post('/api/creators', async (request, reply) => {
     const body = (request.body || {}) as Record<string, unknown>;
-    const creators = await addCreator(body.platform, body.handle, body.name);
+    const creators = await asHttp(() => addCreator(body.platform, body.handle, body.name));
     reply.code(201);
     return { creators };
   });
@@ -879,7 +900,7 @@ function registerRoutes(app: FastifyInstance): void {
   app.post('/api/creators/:id/record', async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = (request.body || {}) as Record<string, unknown>;
-    const session = await recordCreator(id, body.autoClip !== false);
+    const session = await asHttp(() => recordCreator(id, body.autoClip !== false));
     reply.code(201);
     return session;
   });
@@ -895,33 +916,36 @@ function registerRoutes(app: FastifyInstance): void {
   }));
   app.post('/api/live/resolve', async (request) => {
     const url = normalizeUrl((request.body as { url?: unknown })?.url);
-    return resolveLive(url);
+    return asHttp(() => resolveLive(url));
   });
   app.post('/api/live', async (request, reply) => {
     const body = (request.body || {}) as Record<string, unknown>;
     const url = normalizeUrl(body.url);
-    const session = await startLive({
-      url,
-      title: typeof body.title === 'string' ? body.title : undefined,
-      autoClip: typeof body.autoClip === 'boolean' ? body.autoClip : undefined,
-    });
+    const session = await asHttp(() =>
+      startLive({
+        url,
+        title: typeof body.title === 'string' ? body.title : undefined,
+        autoClip: typeof body.autoClip === 'boolean' ? body.autoClip : undefined,
+      }),
+    );
     reply.code(201);
     return session;
   });
   app.patch('/api/live/:id', async (request) => {
     const { id } = request.params as { id: string };
     const body = (request.body || {}) as Record<string, unknown>;
-    if (typeof body.autoClip !== 'boolean') throw new HttpError(400, 'Send autoClip as true or false.');
-    return setLiveAutoClip(id, body.autoClip);
+    const autoClip = body.autoClip;
+    if (typeof autoClip !== 'boolean') throw new HttpError(400, 'Send autoClip as true or false.');
+    return asHttp(() => setLiveAutoClip(id, autoClip));
   });
   app.post('/api/live/:id/stop', async (request) => {
     const { id } = request.params as { id: string };
-    return stopLive(id);
+    return asHttp(() => stopLive(id));
   });
   app.post('/api/live/:id/clips', async (request) => {
     const { id } = request.params as { id: string };
     const settings = cleanSettings((request.body as { settings?: unknown } | undefined)?.settings);
-    return createClipsFromLive(id, settings);
+    return asHttp(() => createClipsFromLive(id, settings));
   });
   app.delete('/api/live/:id', async (request) => {
     const { id } = request.params as { id: string };

@@ -6,6 +6,7 @@ import type {
   ClipFiles,
   ClipRecord,
   FaceSample,
+  LayoutNotice,
   QualityMode,
   RenderAcceleration,
   Word,
@@ -231,6 +232,8 @@ export interface RenderClipOptions {
 export interface RenderClipResult {
   files: ClipFiles;
   faceSamples?: FaceSample[];
+  /** Present when `auto` framing inspected the source. */
+  notice?: LayoutNotice;
   duration: number;
   renderMs: number;
 }
@@ -259,17 +262,25 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
       end: Math.max(0.01, Math.min(duration, word.end)),
     }));
 
-  options.onProgress?.(6, options.reuseFraming ? 'Reusing face framing' : 'Tracking faces');
+  // `auto` resolved to a concrete layout on the first render; an edit re-render
+  // must reuse that decision instead of inventing a different one.
+  const effectiveFraming = clip.framing === 'auto' ? (clip.notice?.mode ?? 'smart') : clip.framing;
+  let notice: LayoutNotice | undefined;
+  options.onProgress?.(
+    6,
+    options.reuseFraming ? 'Reusing face framing' : clip.framing === 'auto' ? 'Noticing the layout' : 'Tracking faces',
+  );
   let filter: string;
   let faceSamples: FaceSample[] | undefined;
   if (options.reuseFraming && clip.faceSamples?.length) {
     faceSamples = clip.faceSamples;
+    if (clip.framing === 'auto') notice = clip.notice;
     filter =
-      clip.framing === 'blur'
+      effectiveFraming === 'blur'
         ? await planBlurOnly(output.width, output.height)
-        : clip.framing === 'center'
+        : effectiveFraming === 'center'
           ? cropExpressionForSamples(undefined, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration)
-          : clip.framing === 'split'
+          : effectiveFraming === 'split'
             ? splitExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, output.width, output.height, duration)
             : cropExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration);
   } else {
@@ -288,6 +299,7 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
     });
     filter = plan.filter;
     faceSamples = plan.faceSamples.length ? plan.faceSamples : undefined;
+    notice = plan.notice;
   }
 
   options.onProgress?.(32, 'Writing captions');
@@ -418,7 +430,7 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
     `rendered ${clip.id} (${duration.toFixed(1)}s) in ${(renderMs / 1000).toFixed(1)}s via ${encoderUsed ?? 'libx264'}`,
   );
   options.onProgress?.(100, 'Ready');
-  return { files, faceSamples, duration, renderMs };
+  return { files, faceSamples, notice, duration, renderMs };
 }
 
 async function planBlurOnly(width: number, height: number): Promise<string> {

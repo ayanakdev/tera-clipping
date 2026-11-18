@@ -37,7 +37,6 @@ interface AppContextValue {
   loading: boolean;
   error: string | null;
   connected: boolean;
-  event: AppEvent | null;
   toasts: Toast[];
   notify: (toast: Omit<ToastEvent, 'id'> & { id?: string }) => void;
   dismissToast: (id: string) => void;
@@ -49,18 +48,37 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
+/**
+ * Server events are delivered through a tiny emitter instead of context state.
+ * Putting the latest event in React state re-rendered every `useApp()` consumer
+ * — the whole shell, page and its charts — once per recording tick. Only the
+ * loaders that ask for a given event type should wake up.
+ */
+type EventListener = (event: AppEvent) => void;
+const eventListeners = new Set<EventListener>();
+
+function emitEvent(event: AppEvent): void {
+  for (const listener of [...eventListeners]) {
+    try {
+      listener(event);
+    } catch {
+      /* one failing listener must not starve the others */
+    }
+  }
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
-  const [event, setEvent] = useState<AppEvent | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirmState, setConfirmState] = useState<(ConfirmOptions & { resolve: (value: boolean) => void }) | null>(null);
   const timers = useRef(new Map<string, number>());
   const seenToasts = useRef(new Set<string>());
   const systemTimer = useRef<number | null>(null);
+  const booted = useRef(false);
 
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.map((toast) => (toast.id === id ? { ...toast, leaving: true } : toast)));
@@ -118,6 +136,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    // StrictMode mounts effects twice in dev; the bootstrap/system probes spawn
+    // ffmpeg, ffprobe and yt-dlp on the server, so only run them once.
+    if (booted.current) return;
+    booted.current = true;
     void refresh();
     void refreshSystem();
   }, [refresh, refreshSystem]);
@@ -157,7 +179,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           } catch {
             data = (raw as MessageEvent).data;
           }
-          setEvent({ type: name, data, at: Date.now() });
+          emitEvent({ type: name, data, at: Date.now() });
           if (name === 'toast' && data) notify(data as ToastEvent);
           if (name === 'setup.status' || name === 'setup.progress') {
             if (systemTimer.current) window.clearTimeout(systemTimer.current);
@@ -219,7 +241,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       loading,
       error,
       connected,
-      event,
       toasts,
       notify,
       dismissToast,
@@ -234,7 +255,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       loading,
       error,
       connected,
-      event,
       toasts,
       notify,
       dismissToast,
@@ -271,15 +291,20 @@ export function useApp(): AppContextValue {
 
 /** Subscribe to server events without pulling in a global store. */
 export function useAppEvent(handler: (event: AppEvent) => void, types?: string[]): void {
-  const { event } = useApp();
   const latest = useRef(handler);
   latest.current = handler;
   const accepted = types?.join('|');
   useEffect(() => {
-    if (!event) return;
-    if (accepted && !accepted.split('|').includes(event.type)) return;
-    latest.current(event);
-  }, [event, accepted]);
+    const wanted = accepted ? new Set(accepted.split('|')) : null;
+    const listener: EventListener = (event) => {
+      if (wanted && !wanted.has(event.type)) return;
+      latest.current(event);
+    };
+    eventListeners.add(listener);
+    return () => {
+      eventListeners.delete(listener);
+    };
+  }, [accepted]);
 }
 
 export function useConfirmState() {
