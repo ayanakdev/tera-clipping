@@ -478,15 +478,23 @@ export function HeatTimeline({
   const viewHeight = height;
   const x = (t: number) => (Math.max(0, Math.min(t, maxT)) / maxT) * (width - pad * 2) + pad;
   const y = (value: number) => viewHeight - 22 - value * (viewHeight - 42);
+  const chatValues = chatHeat
+    .map((point) => Number(point.chat) || 0)
+    .filter((value) => value > 0)
+    .sort((a, b) => a - b);
+  // Divide by the 95th percentile instead of a fixed 8 messages. Big streams
+  // sit at 30+ messages a tick, small chats at 2; both should look readable.
+  const chatCeiling = Math.max(
+    4,
+    (chatValues[Math.min(chatValues.length - 1, Math.floor(chatValues.length * 0.95))] ?? 0) * 1.15,
+  );
   const build = (points: HeatPoint[], key: 'audio' | 'chat') => {
     const usable = points.filter((point) => point[key] !== undefined);
     if (!usable.length) return '';
     return usable
       .map((point, index) => {
         const raw = Number(point[key]);
-        // `chat` is a message count per tick, so scale it the same way the
-        // server does (8 messages ≈ full heat) before drawing it as 0–1.
-        const value = key === 'chat' ? raw / 8 : raw;
+        const value = key === 'chat' ? raw / chatCeiling : raw;
         return `${index === 0 ? 'M' : 'L'}${x(point.t).toFixed(1)},${y(Math.max(0, Math.min(1, value))).toFixed(1)}`;
       })
       .join(' ');

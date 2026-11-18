@@ -691,13 +691,23 @@ export default function NewClips() {
                     ]}
                   />
                 </Field>
-                <Field label="Reframing" hint={settings.reframe === 'smart' ? 'tracks faces' : undefined}>
+                <Field
+                  label="Reframing"
+                  hint={
+                    settings.reframe === 'smart'
+                      ? 'tracks faces'
+                      : settings.reframe === 'split'
+                        ? 'game on top, cam below'
+                        : undefined
+                  }
+                >
                   <Segmented
                     className="segmented-wide"
                     value={settings.reframe}
                     onChange={(value) => update('reframe', value as ReframeMode)}
                     options={[
                       { value: 'smart', label: 'Smart' },
+                      { value: 'split', label: 'Game + cam' },
                       { value: 'center', label: 'Center' },
                       { value: 'blur', label: 'Blur fill' },
                     ]}

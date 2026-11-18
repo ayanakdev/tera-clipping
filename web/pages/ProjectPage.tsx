@@ -28,8 +28,10 @@ import type {
   HookStyleId,
   Project,
   ReframeMode,
+  SubtitleCue,
 } from '@shared/types';
 import { CAPTION_BY_ID, CAPTION_PRESETS, HOOK_STYLES } from '@shared/presets';
+import { cuesFromWords } from '@shared/utils';
 import { api, mediaUrl, type ClipPatch } from '@web/lib/api';
 import { clock, shortDate, timeAgo } from '@web/lib/format';
 import { useAsyncData } from '@web/lib/hooks';
@@ -758,11 +760,19 @@ interface EditorForm {
   captionScale: number;
   hookStyle: ClipRecord['hookStyle'];
   framing: ReframeMode;
+  subtitles: SubtitleCue[];
   start: number;
   end: number;
 }
 
 function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: EditorProps) {
+  const initialSubtitles = useMemo<SubtitleCue[]>(
+    () =>
+      clip.subtitles?.length
+        ? clip.subtitles.map((cue) => ({ ...cue }))
+        : cuesFromWords(clip.words, clip.duration),
+    [clip.id, clip.updatedAt],
+  );
   const [form, setForm] = useState<EditorForm>(() => ({
     title: clip.title,
     hook: clip.hook,
@@ -772,6 +782,7 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
     captionScale: clip.captionScale ?? project.settings.captionScale ?? 1,
     hookStyle: clip.hookStyle,
     framing: clip.framing,
+    subtitles: initialSubtitles.map((cue) => ({ ...cue })),
     start: Math.round(clip.start * 10) / 10,
     end: Math.round(clip.end * 10) / 10,
   }));
@@ -802,6 +813,7 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
     if (form.hook !== clip.hook) patch.hook = form.hook;
     if (form.caption !== clip.caption) patch.caption = form.caption;
     if (JSON.stringify(form.hashtags) !== JSON.stringify(clip.hashtags)) patch.hashtags = form.hashtags;
+    if (JSON.stringify(form.subtitles) !== JSON.stringify(initialSubtitles)) patch.subtitles = form.subtitles;
     if (form.captionPreset !== clip.captionPreset) patch.captionPreset = form.captionPreset;
     const clipScale = clip.captionScale ?? project.settings.captionScale ?? 1;
     if (Math.abs(form.captionScale - clipScale) > 0.005) patch.captionScale = form.captionScale;
@@ -816,6 +828,7 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
     changes.hook !== undefined ||
       changes.captionPreset !== undefined ||
       changes.captionScale !== undefined ||
+      changes.subtitles !== undefined ||
       changes.hookStyle !== undefined ||
       changes.framing !== undefined ||
       changes.start !== undefined ||
@@ -839,6 +852,35 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
     }
     set('hashtags', [...form.hashtags, `#${raw}`]);
     setTagDraft('');
+  };
+
+  const cueLimit = Math.max(0.5, Math.round((form.end - form.start) * 10) / 10);
+  const updateCue = (index: number, patch: Partial<SubtitleCue>) => {
+    setForm((current) => {
+      const limit = Math.max(0.5, Math.round((current.end - current.start) * 10) / 10);
+      const subtitles = current.subtitles.map((cue, i) => {
+        if (i !== index) return cue;
+        const next = { ...cue, ...patch };
+        const rawStart = Number(next.start);
+        const rawEnd = Number(next.end);
+        const start = Math.max(0, Math.min(limit - 0.2, Number.isFinite(rawStart) ? rawStart : cue.start));
+        const end = Math.max(start + 0.2, Math.min(limit, Number.isFinite(rawEnd) ? rawEnd : cue.end));
+        return {
+          start: Math.round(start * 100) / 100,
+          end: Math.round(end * 100) / 100,
+          text: next.text,
+        };
+      });
+      return { ...current, subtitles };
+    });
+  };
+  const addCue = () => {
+    const last = form.subtitles[form.subtitles.length - 1];
+    const start = Math.min(Math.max(0, cueLimit - 0.5), last ? last.end : 0);
+    set('subtitles', [...form.subtitles, { start, end: Math.min(cueLimit, start + 2), text: '' }]);
+  };
+  const resetCues = () => {
+    set('subtitles', cuesFromWords(clip.words, clip.duration).map((cue) => ({ ...cue })));
   };
 
   const save = async () => {
@@ -1017,13 +1059,26 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
                   placeholder="What happens in the clip"
                 />
               </Field>
-              <Field label="Hook card" hint={`${form.hook.length}/120`}>
+              <Field label="Top hook (text on video)" hint={`${form.hook.length}/120`}>
                 <Input
                   value={form.hook}
                   maxLength={120}
                   onChange={(event) => set('hook', event.target.value)}
                   placeholder="The line that stops the scroll"
                 />
+                <div className="emoji-row" aria-label="Add an emoji to the hook">
+                  {['😳', '😭', '🔥', '🤯', '👀', '💀', '😅', '🚨', '💯', '🤣'].map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      className="emoji-chip"
+                      onClick={() => set('hook', `${form.hook.trim()} ${emoji}`.trim().slice(0, 120))}
+                      title={`Add ${emoji} to the hook`}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
               </Field>
               <Field label="Caption" hint={`${form.caption.length}/240`}>
                 <textarea
@@ -1129,6 +1184,69 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
 
           <div className="editor-form-section">
             <div className="editor-form-title">
+              Subtitles <span>Editable burn-in lines</span>
+            </div>
+            <p className="field-help">
+              Rewrite any line, fix a word or retime it. Times are relative to this clip and saving re-renders the burned captions.
+            </p>
+            <div className="subtitle-rows">
+              {form.subtitles.map((cue, index) => (
+                <div className="subtitle-row" key={`cue-${index}`}>
+                  <div className="subtitle-times">
+                    <input
+                      className="input subtitle-time"
+                      type="number"
+                      min={0}
+                      max={cueLimit}
+                      step={0.1}
+                      value={cue.start}
+                      onChange={(event) => updateCue(index, { start: Number(event.target.value) })}
+                      aria-label={`Subtitle ${index + 1} start`}
+                    />
+                    <span aria-hidden>→</span>
+                    <input
+                      className="input subtitle-time"
+                      type="number"
+                      min={0}
+                      max={cueLimit}
+                      step={0.1}
+                      value={cue.end}
+                      onChange={(event) => updateCue(index, { end: Number(event.target.value) })}
+                      aria-label={`Subtitle ${index + 1} end`}
+                    />
+                  </div>
+                  <textarea
+                    className="input subtitle-text"
+                    rows={2}
+                    maxLength={240}
+                    value={cue.text}
+                    placeholder="Subtitle text"
+                    onChange={(event) => updateCue(index, { text: event.target.value })}
+                    aria-label={`Subtitle ${index + 1} text`}
+                  />
+                  <IconButton
+                    icon={X}
+                    label={`Remove subtitle ${index + 1}`}
+                    onClick={() => set('subtitles', form.subtitles.filter((_, i) => i !== index))}
+                  />
+                </div>
+              ))}
+              {!form.subtitles.length ? (
+                <p className="field-help">No subtitle lines yet. Add one, or reset from the transcript.</p>
+              ) : null}
+            </div>
+            <div className="subtitle-actions">
+              <Button variant="secondary" size="sm" icon={Plus} onClick={addCue} type="button">
+                Add line
+              </Button>
+              <Button variant="ghost" size="sm" icon={RotateCcw} onClick={resetCues} type="button">
+                Reset from transcript
+              </Button>
+            </div>
+          </div>
+
+          <div className="editor-form-section">
+            <div className="editor-form-title">
               Hook & framing <span>Re-renders on save</span>
             </div>
             <div style={{ display: 'grid', gap: 13 }}>
@@ -1167,6 +1285,7 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
                   onChange={(value) => set('framing', value as ReframeMode)}
                   options={[
                     { value: 'smart', label: 'Smart' },
+                    { value: 'split', label: 'Game + cam' },
                     { value: 'center', label: 'Center' },
                     { value: 'blur', label: 'Blur fill' },
                   ]}

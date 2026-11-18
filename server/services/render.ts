@@ -16,7 +16,7 @@ import { log } from '../lib/logger';
 import { parseFfmpegProgress, runProcess } from '../lib/process';
 import { writeCaptionFiles } from './captions';
 import { renderHookPng } from './hook';
-import { planReframe, cropExpressionForSamples } from './reframe';
+import { planReframe, cropExpressionForSamples, splitExpressionForSamples } from './reframe';
 
 const QUALITY: Record<QualityMode, { preset: string; crf: number }> = {
   fast: { preset: 'veryfast', crf: 23 },
@@ -269,7 +269,9 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
         ? await planBlurOnly(output.width, output.height)
         : clip.framing === 'center'
           ? cropExpressionForSamples(undefined, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration)
-          : cropExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration);
+          : clip.framing === 'split'
+            ? splitExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, output.width, output.height, duration)
+            : cropExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration);
   } else {
     const plan = await planReframe({
       sourcePath: options.sourcePath,
@@ -294,6 +296,7 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
     aspect,
     duration,
     scale: clip.captionScale ?? 1,
+    subtitles: clip.subtitles,
   });
 
   options.onProgress?.(36, 'Building hook');

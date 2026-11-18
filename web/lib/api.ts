@@ -21,6 +21,7 @@ import type {
   ReframeMode,
   Submission,
   StudioStats,
+  SubtitleCue,
   SystemStatus,
   ToastEvent,
 } from '@shared/types';
@@ -91,6 +92,7 @@ export interface ClipPatch {
   captionScale?: number;
   caption?: string;
   hashtags?: string[];
+  subtitles?: SubtitleCue[];
   framing?: ReframeMode;
   start?: number;
   end?: number;
@@ -214,6 +216,15 @@ export const api = {
   libraryDownloadUrl: (clipId: string) => `/api/library/${clipId}/download`,
   libraryKit: (clipId: string) => request<{ kit: string }>(`/api/library/${clipId}/kit`),
   deleteLibraryClip: (clipId: string) => request<{ ok: boolean }>(`/api/library/${clipId}`, { method: 'DELETE' }),
+  bulkDeleteLibrary: (clipIds: string[]) =>
+    request<{ deleted: number; missing: string[] }>('/api/library/bulk-delete', json({ clipIds })),
+  libraryExportUrl: (clipIds: string[], starred = false) => {
+    const query = new URLSearchParams();
+    if (clipIds.length) query.set('ids', clipIds.join(','));
+    if (starred) query.set('starred', '1');
+    const suffix = query.toString();
+    return `/api/library/export${suffix ? `?${suffix}` : ''}`;
+  },
 
   campaigns: () => request<{ campaigns: Campaign[]; submissions: Submission[] }>('/api/campaigns'),
   createCampaign: (body: Partial<Campaign> & { name: string; brand: string }) =>

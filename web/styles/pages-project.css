@@ -448,6 +448,78 @@
   color: var(--violet-800);
 }
 
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--violet-200);
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(196, 181, 253, 0.22), rgba(196, 181, 253, 0.06));
+}
+
+.bulk-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--violet-800);
+}
+
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.library-select-wrap {
+  position: relative;
+  min-width: 0;
+  border-radius: 16px;
+}
+
+.library-select-wrap.is-selected {
+  outline: 2px solid var(--violet-500);
+  outline-offset: 2px;
+}
+
+.clip-select-box {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: 0 5px 14px -5px rgba(23, 17, 32, 0.5);
+}
+
+.clip-select-box.is-on {
+  background: var(--violet-600);
+  border-color: #fff;
+  color: #fff;
+}
+
+.kit-help {
+  margin-top: 8px !important;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-soft);
+  font-size: 10.5px !important;
+  line-height: 1.45;
+  color: var(--muted) !important;
+}
+
 /* ---------- posting kit ---------- */
 
 .kit-head {

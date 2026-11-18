@@ -12,9 +12,11 @@ import type {
   Project,
   ProjectStatus,
   SourceKind,
+  SubtitleCue,
   Word,
 } from '../../shared/types';
 import { DEFAULT_SETTINGS } from '../../shared/presets';
+import { cleanSpokenText } from '../../shared/utils';
 import { CONFIG, PATHS, fromData, toData } from '../config';
 import { bus } from '../lib/events';
 import { log } from '../lib/logger';
@@ -288,7 +290,13 @@ async function runPipeline(projectId: string, signal: AbortSignal): Promise<void
     analysisEngine: 'pending',
     startedAt,
   };
+  // Replanning replaces the clip set. Wipe the clips folder so old renders,
+  // orphaned files from earlier plans and stale hook PNGs cannot eat disk
+  // space. The source file lives in the project root, not here.
   project.clips = [];
+  await fsp
+    .rm(path.join(PATHS.projects, projectId, 'clips'), { recursive: true, force: true })
+    .catch(() => undefined);
   await persist(project, true);
 
   const sourceAbs = await ensureSource(project, signal);
@@ -549,6 +557,30 @@ function buildClip(
   };
 }
 
+function normalizeSubtitles(input: SubtitleCue[], duration: number): SubtitleCue[] {
+  const cues = input
+    .map((cue) => ({
+      start: Math.max(0, Math.min(duration, Number(cue?.start) || 0)),
+      end: Math.max(0, Math.min(duration, Number(cue?.end) || 0)),
+      text: cleanSpokenText(String(cue?.text || '')).slice(0, 240),
+    }))
+    .filter((cue) => cue.text.length > 0)
+    .sort((a, b) => a.start - b.start);
+  const out: SubtitleCue[] = [];
+  for (const cue of cues) {
+    if (cue.end <= cue.start + 0.15) cue.end = Math.min(duration, cue.start + Math.max(0.8, cue.text.split(/\s+/).length * 0.32));
+    const previous = out[out.length - 1];
+    if (previous && cue.start < previous.end) cue.start = previous.end;
+    if (cue.end <= cue.start + 0.1) continue;
+    out.push({
+      start: Math.round(cue.start * 100) / 100,
+      end: Math.round(cue.end * 100) / 100,
+      text: cue.text,
+    });
+  }
+  return out.slice(0, 300);
+}
+
 export interface ClipEdit {
   title?: string;
   hook?: string;
@@ -557,6 +589,8 @@ export interface ClipEdit {
   captionScale?: number;
   caption?: string;
   hashtags?: string[];
+  /** Full replacement for the burned subtitle rows, relative to the clip. */
+  subtitles?: SubtitleCue[];
   framing?: ClipSettings['reframe'];
   start?: number;
   end?: number;
@@ -600,6 +634,13 @@ export async function editClip(
   }
   if (patch.caption !== undefined) clip.caption = patch.caption.slice(0, 240);
   if (patch.hashtags !== undefined) clip.hashtags = patch.hashtags.slice(0, 8);
+  if (patch.subtitles !== undefined) {
+    clip.subtitles = normalizeSubtitles(patch.subtitles, clip.end - clip.start);
+  } else if (boundariesChanged) {
+    // Old subtitle times no longer line up after trimming, so fall back to the
+    // freshly cut words.
+    clip.subtitles = undefined;
+  }
   if (patch.framing !== undefined) {
     clip.framing = patch.framing;
     clip.faceSamples = undefined;
@@ -612,6 +653,7 @@ export async function editClip(
     patch.hookStyle !== undefined ||
     patch.captionPreset !== undefined ||
     patch.captionScale !== undefined ||
+    patch.subtitles !== undefined ||
     patch.framing !== undefined ||
     boundariesChanged;
   const shouldRender = mode === 'always' || visualChanged;

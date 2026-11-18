@@ -2,8 +2,9 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
-import type { AspectRatio, CaptionPresetId, Word } from '../../shared/types';
+import type { AspectRatio, CaptionPresetId, SubtitleCue, Word } from '../../shared/types';
 import { CAPTION_BY_ID, ASPECT_SIZES } from '../../shared/presets';
+import { isSpeakableToken, stripSoundTags } from '../../shared/utils';
 import { PATHS } from '../config';
 
 const FONT_FILES: Record<string, string> = {
@@ -165,6 +166,8 @@ export interface CaptionOptions {
   /** Caption size multiplier (1 = preset default). */
   scale?: number;
   overlayTitle?: string;
+  /** Edited subtitle lines. When present these replace word-derived cues. */
+  subtitles?: SubtitleCue[];
 }
 
 function scaleValue(raw: number | undefined): number {
@@ -287,6 +290,79 @@ function makeCues(words: Word[], options: CaptionOptions): Cue[] {
   return cues;
 }
 
+function makeSubtitleCues(subtitles: SubtitleCue[], options: CaptionOptions): Cue[] {
+  const { width: frameW, height: frameH } = ASPECT_SIZES[options.aspect];
+  const preset = CAPTION_BY_ID[options.preset];
+  const font = preset.font;
+  const minDim = Math.min(frameW, frameH);
+  const fontSize = Math.round(((FONT_SIZE[options.preset] * minDim) / 1080) * scaleValue(options.scale));
+  const maxTextWidth = Math.min(frameW - 130, preset.box ? 840 : 1000);
+  const lineHeight = fontSize * 1.16;
+  const position =
+    options.aspect === '9:16' ? frameH * 0.745 : options.aspect === '1:1' ? frameH * 0.8 : frameH * 0.82;
+  const centerX = frameW / 2;
+  const padX = Math.round(fontSize * 0.62);
+  const padY = Math.round(fontSize * 0.38);
+  const display = (word: Word): string => (preset.uppercase ? word.text.toUpperCase() : word.text);
+
+  const cues: Cue[] = [];
+  for (const subtitle of subtitles) {
+    const text = stripSoundTags(String(subtitle.text || '')).replace(/\s+/g, ' ').trim();
+    const tokens = text.split(' ').filter((token) => token && isSpeakableToken(token));
+    if (!tokens.length) continue;
+    const start = Math.max(0, Math.min(options.duration - 0.2, Number(subtitle.start) || 0));
+    let end = Math.max(start + 0.4, Math.min(options.duration, Number(subtitle.end) || start + 2));
+    if (end <= start + 0.2) end = Math.min(options.duration, start + Math.max(0.8, tokens.length * 0.3));
+    const weights = tokens.map((token) => Math.max(2, token.replace(/[^\p{L}\p{N}]/gu, '').length));
+    const total = weights.reduce((sum, weight) => sum + weight, 0);
+    const span = Math.max(0.4, end - start);
+    let cursor = start;
+    const cueWords: Word[] = tokens.map((token, index) => {
+      const from = cursor;
+      const to = index === tokens.length - 1 ? end : cursor + (span * weights[index]!) / total;
+      cursor = to;
+      return { text: token, start: from, end: Math.max(from + 0.05, to) };
+    });
+
+    const lines: Word[][] = [];
+    let line: Word[] = [];
+    let lineWidth = 0;
+    for (const word of cueWords) {
+      const raw = escapeAss(display(word));
+      const space = line.length ? measureText(' ', font, fontSize) : 0;
+      const wordWidth = measureText(raw, font, fontSize);
+      if (line.length && lineWidth + space + wordWidth > maxTextWidth) {
+        lines.push(line);
+        line = [word];
+        lineWidth = wordWidth;
+      } else {
+        line.push(word);
+        lineWidth += space + wordWidth;
+      }
+    }
+    if (line.length) lines.push(line);
+    if (!lines.length) continue;
+    const widths = lines.map((lineWords) => measureText(lineWords.map((word) => escapeAss(display(word))).join(' '), font, fontSize));
+    const maxWidth = widths.length ? Math.max(...widths) : 0;
+    const boxWidth = Math.min(frameW - 40, Math.max(280, maxWidth + padX * 2));
+    const boxHeight = lines.length * lineHeight + padY * 2;
+    cues.push({
+      start,
+      end,
+      words: cueWords,
+      lines,
+      lineWidths: widths,
+      fontSize,
+      lineHeight,
+      boxWidth,
+      boxHeight,
+      centerX,
+      centerY: position,
+    });
+  }
+  return cues;
+}
+
 function buildAss(cues: Cue[], options: CaptionOptions): string {
   const { width: frameW, height: frameH } = ASPECT_SIZES[options.aspect];
   const preset = CAPTION_BY_ID[options.preset];
@@ -387,7 +463,16 @@ export async function writeCaptionFiles(
   options: CaptionOptions,
 ): Promise<{ cues: number; cleanWords: Word[] }> {
   loadCaptionFonts();
-  const cues = makeCues(words, options);
+  // Belt and braces: even a hand-edited clip or an old cached transcript must
+  // never burn `(gunfire)` or a music note into the video.
+  const cleanWords = words
+    .map((word) => {
+      const text = stripSoundTags(String(word.text || '')).trim();
+      return text && isSpeakableToken(text) ? { ...word, text } : null;
+    })
+    .filter((word): word is Word => Boolean(word));
+  const editedCues = Array.isArray(options.subtitles) ? options.subtitles : [];
+  const cues = editedCues.length ? makeSubtitleCues(editedCues, options) : makeCues(cleanWords, options);
   await fsp.mkdir(path.dirname(outAss), { recursive: true });
   if (!cues.length) {
     await fsp.writeFile(outAss, `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`, 'utf8');
@@ -406,7 +491,7 @@ export async function writeCaptionFiles(
       .join('\n');
     await fsp.writeFile(outSrt, srt, 'utf8');
   }
-  return { cues: cues.length, cleanWords: words };
+  return { cues: cues.length, cleanWords };
 }
 
 function srtTime(seconds: number): string {

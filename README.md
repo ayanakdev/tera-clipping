@@ -24,12 +24,12 @@ No login. No database. No cloud dashboard. Every project, clip, campaign and cou
 | --- | --- |
 | **Sources** | YouTube, Twitch, Kick, Rumble, X and TikTok links, plus direct MP4/MOV/MKV/WebM uploads |
 | **Moment finding** | Local transcript analysis, audio-energy peaks, optional Gemini editorial pass, chat-heat boost from live recordings |
-| **Captions** | Word-level timing, six looks: Tera Box (default), Hormozi, Purple Pop, One Word, Neon, Clean — plus a 60–160% size slider per project and per clip |
+| **Captions** | Word-level timing, six looks: Tera Box (default), Hormozi, Purple Pop, One Word, Neon, Clean — plus a 60–160% size slider per project and per clip. Editable subtitle rows rewrite and re-time the burn-in on save |
 | **Hooks** | Top-centre hook card rendered as a transparent PNG; white, ink or purple cards, or no hook |
-| **Reframing** | YuNet face tracking with smooth alpha-beta crops; smart, centre or blurred backgrounds |
+| **Reframing** | YuNet face tracking with smooth alpha-beta crops; smart face crop, game + cam split (gameplay on top, tracked webcam below), centre or blurred backgrounds |
 | **Live** | 6-second MPEG-TS segments, auto-reconnect, live stream thumbnail, Twitch/Kick chat capture, heat timeline, one-click creator radar |
 | **Campaigns** | Brand briefs, required tags/mentions, submission tracking, payout estimates — all local |
-| **Library** | Per-clip downloads, posters, captions, posting kits, star favourites, bulk export |
+| **Library** | Per-clip downloads, posters, captions, posting kits, star favourites, multi-select delete, download all and ZIP export |
 | **Persistence** | JSON index in `data/`, lifetime counters that survive restarts and project deletion |
 
 ## Requirements

@@ -12,6 +12,7 @@ import type {
 import { log } from '../lib/logger';
 import type { AudioAnalysis } from './audio';
 import { geminiAvailable, geminiBudgetLeft, geminiJson, parseJsonLoose } from './gemini';
+import { isSpeakableToken, stripSoundTags } from '../../shared/utils';
 
 const STOPWORDS = new Set(
   `a about above after again against all am an and any are aren't as at be because been before being below between both but by can can't cannot could couldn't did didn't do does doesn't doing don't down during each few for from further had hadn't has hasn't have haven't having he he'd he'll he's her here here's hers herself him himself his how how's i i'd i'll i'm i've if in into is isn't it it's its itself let's me more most mustn't my myself no nor not of off on once only or other ought our ours ourselves out over own same shan't she she'd she'll she's should shouldn't so some such than that that's the their theirs them themselves then there there's these they they'd they'll they're they've this those through to too under until up very was wasn't we we'd we'll we're we've were weren't what what's when when's where where's which while who who's whom why why's with won't would wouldn't you you'd you'll you're you've your yours yourself yourselves`.split(
@@ -144,6 +145,37 @@ const PAYOFF_END = [
 const PRONOUN_START = new Set(['it', 'this', 'that', 'these', 'those', 'he', 'she', 'they', 'him', 'her', 'them']);
 const FILLER_START = new Set(['so', 'okay', 'ok', 'and', 'but', 'like', 'uh', 'um', 'yeah', 'well', 'now', 'then', 'anyway']);
 const LEADING_FILLER = /^(?:so|okay|ok|and|but|like|uh|um|yeah|well|now|then|anyway|honestly|literally)[,\s]+/i;
+const SENTENCE_END = /[.!?…]["')\]]?$/;
+const DANGLING_END =
+  /\b(and|but|so|or|because|if|when|while|with|to|of|for|the|a|an|my|your|his|her|their|our|i|we|they|he|she|it|that|this|is|was|are|were|im|i'm|like|than|then|as|at|on|in)$/i;
+
+type PoolEntry = {
+  start: number;
+  end: number;
+  unit: Unit;
+  units: Unit[];
+  firstIndex: number;
+  text: string;
+  wordCount: number;
+};
+
+/**
+ * A sentence that opens with "it", "that", "so" or "and" only makes sense if
+ * the previous sentence comes with it. Include that lead-in when it is close
+ * enough, which is what stops clips from starting mid-thought.
+ */
+function openingNeedsContext(unit: Unit): boolean {
+  const first = textWords(unit.text)[0] || '';
+  return PRONOUN_START.has(first) || FILLER_START.has(first);
+}
+
+function endingNeedsContext(unit: Unit): boolean {
+  const text = unit.text.trim();
+  if (!text) return false;
+  if (SENTENCE_END.test(text)) return false;
+  const tail = textWords(text).slice(-1)[0] || '';
+  return DANGLING_END.test(tail);
+}
 
 const CATEGORY_WORDS: Record<string, string[]> = {
   funny: ['laugh', 'laughing', 'funny', 'joke', 'hilarious', 'dead', 'lmao', 'lol', 'rofl', 'clown', 'troll'],
@@ -260,11 +292,11 @@ function clamp01(value: number): number {
 }
 
 function textWords(text: string): string[] {
-  return text
+  return stripSoundTags(text)
     .toLowerCase()
     .replace(/[^a-z0-9'$% ]+/g, ' ')
     .split(/\s+/)
-    .filter(Boolean);
+    .filter((word) => word.length > 0 && isSpeakableToken(word));
 }
 
 function meaningfulWords(text: string): Set<string> {
@@ -281,21 +313,29 @@ function countMatches(text: string, list: string[]): number {
 }
 
 function sentenceUnits(transcript: Transcript): Unit[] {
-  const units: Unit[] = transcript.segments
-    .filter((segment) => segment.words.length && segment.text.trim())
-    .map((segment, index) => ({
-      index,
-      start: segment.start,
-      end: segment.end,
-      text: segment.text.trim(),
-      words: segment.words,
-      low: segment.text.toLowerCase(),
-    }));
+  const units: Unit[] = [];
+  for (const segment of transcript.segments) {
+    const words = (segment.words || [])
+      .map((word) => ({ ...word, text: stripSoundTags(String(word.text || '')).trim() }))
+      .filter((word) => word.text && isSpeakableToken(word.text));
+    const text = stripSoundTags(segment.text || '').trim() || words.map((word) => word.text).join(' ');
+    if (!words.length || !text.trim()) continue;
+    units.push({
+      index: units.length,
+      start: words[0]!.start,
+      end: words[words.length - 1]!.end,
+      text,
+      words,
+      low: text.toLowerCase(),
+    });
+  }
 
   if (units.length) return units;
 
   // Fallback for transcripts without sentence metadata.
-  const words = transcript.words;
+  const words = transcript.words
+    .map((word) => ({ ...word, text: stripSoundTags(String(word.text || '')).trim() }))
+    .filter((word) => word.text && isSpeakableToken(word.text));
   const out: Unit[] = [];
   let bucket: typeof words = [];
   const flush = () => {
@@ -438,33 +478,60 @@ function titleCase(text: string): string {
 }
 
 function cleanPhrase(text: string, maxWords = 9, maxChars = 62): string {
-  let clean = text
+  let clean = stripSoundTags(text)
     .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\*[^*]*\*/g, ' ')
     .replace(LEADING_FILLER, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/[,;:.!?]+$/, '');
+    .replace(/^[,;:.!?]+|[,;:.!?]+$/g, '');
   const clause = clean.split(/\s+(?:but|and then|so)\s+/i)[0] || clean;
   if (clause.length >= 18) clean = clause;
-  const words = clean.split(' ');
-  if (words.length > maxWords) clean = words.slice(0, maxWords).join(' ');
+  let words = clean.split(' ').filter((word) => word && isSpeakableToken(word));
+  if (words.length > maxWords) words = words.slice(0, maxWords);
+  clean = words.join(' ');
   if (clean.length > maxChars) clean = clean.slice(0, maxChars).replace(/\s+\S*$/, '');
   return clean.replace(/[,;:.!?]+$/, '').trim();
 }
 
+/** Pick the most readable line in a moment, not just whatever came first. */
+function bestPhrase(text: string, maxWords = 9): string {
+  const sentences = stripSoundTags(text)
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => textWords(sentence).length >= 3);
+  if (!sentences.length) return cleanPhrase(text, maxWords);
+  const ranked = sentences
+    .map((sentence) => {
+      const words = textWords(sentence).length;
+      return {
+        sentence,
+        score: hookPart(sentence) * 0.55 + Math.min(1, words / 12) * 0.35 + (words >= 5 ? 0.1 : 0),
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+  return cleanPhrase(ranked[0]!.sentence, maxWords);
+}
+
 function hookOptionsFor(firstSentences: string, category: string, seed: number): HookOption[] {
-  const firstSentence = firstSentences.split(/(?<=[.!?])\s+/)[0] || firstSentences;
+  const clean = stripSoundTags(firstSentences);
+  const firstSentence = clean.split(/(?<=[.!?])\s+/)[0] || clean;
   const phrase = cleanPhrase(firstSentence);
+  const phraseWords = phrase.split(' ').filter(Boolean).length;
   const emoji = EMOJI[seed % EMOJI.length]!;
   const options: HookOption[] = [];
   const push = (text: string, style: HookOption['style']) => {
-    if (text && options.length < 5 && !options.some((option) => option.text === text)) options.push({ text, style });
+    const value = stripSoundTags(text).replace(/\s+/g, ' ').trim();
+    if (value && options.length < 5 && !options.some((option) => option.text === value)) {
+      options.push({ text: value, style });
+    }
   };
 
-  if (/\?/.test(firstSentences) && phrase.length >= 12) {
+  if (/\?/.test(firstSentence) && phrase.length >= 12 && phraseWords >= 3) {
     push(`${phrase} ${emoji}`, 'question');
   }
-  const strongPhrase = phrase.length >= 14 && phrase.split(' ').length >= 3 && hookPart(phrase) >= 0.4;
+  const strongPhrase = phrase.length >= 14 && phraseWords >= 3 && hookPart(phrase) >= 0.4;
   if (strongPhrase) push(`${phrase} ${emoji}`, 'curiosity');
   if (category === 'funny') push(`I was not ready for this ${emoji}`, 'humor');
   if (category === 'clutch') push(`This is actually insane ${emoji}`, 'stakes');
@@ -472,7 +539,8 @@ function hookOptionsFor(firstSentences: string, category: string, seed: number):
   if (category === 'story') push(`This story took a turn ${emoji}`, 'curiosity');
   if (category === 'wholesome') push(`This restored my faith ${emoji}`, 'pov');
 
-  if (!strongPhrase && phrase.length >= 14 && phrase.split(' ').length >= 3) push(`${phrase} ${emoji}`, 'curiosity');
+  if (!strongPhrase && phrase.length >= 14 && phraseWords >= 3) push(`${phrase} ${emoji}`, 'curiosity');
+  // Last-resort hooks stay useful without pretending to quote the streamer.
   push(`You need to see this ${emoji}`, 'curiosity');
   push(`Wait for the ending ${emoji}`, 'stakes');
   push(`Nobody expected this ${emoji}`, 'contrarian');
@@ -481,9 +549,15 @@ function hookOptionsFor(firstSentences: string, category: string, seed: number):
   return options.slice(0, 4);
 }
 
-function titleFor(phrase: string, category: string): string {
-  const clean = cleanPhrase(phrase, 9, 64);
-  if (clean.length >= 18) return titleCase(clean);
+function titleFor(phrase: string, category: string, fullText = ''): string {
+  // Prefer a specific spoken line over a generic template. This is what keeps
+  // titles like "The moment everything changed" out of the library.
+  let clean = cleanPhrase(phrase, 9, 64);
+  if (clean.length < 18) {
+    const better = bestPhrase(fullText, 9);
+    if (better.length > clean.length) clean = better;
+  }
+  if (clean.length >= 18 && isSpeakableToken(clean)) return titleCase(clean);
   const fallback: Record<string, string> = {
     funny: 'The moment chat lost it',
     clutch: 'The clutch of the stream',
@@ -548,32 +622,51 @@ function reasonFor(parts: ScoreParts): string {
   return `Picked for ${winners.join(', ')}.`;
 }
 
-function buildPool(units: Unit[], duration: number, minDuration: number, maxDuration: number): Array<{
-  start: number;
-  end: number;
-  unit: Unit;
-  units: Unit[];
-  firstIndex: number;
-  text: string;
-  wordCount: number;
-}> {
-  const pool: Array<{ start: number; end: number; unit: Unit; units: Unit[]; firstIndex: number; text: string; wordCount: number }> = [];
+function buildPool(units: Unit[], duration: number, minDuration: number, maxDuration: number): PoolEntry[] {
+  const pool: PoolEntry[] = [];
+  const seen = new Set<string>();
   for (let i = 0; i < units.length; i++) {
-    const first = units[i]!;
     for (let j = i; j < units.length; j++) {
+      const first = units[i]!;
       const last = units[j]!;
       const rawDuration = last.end - first.start;
       if (rawDuration > maxDuration + 3) break;
       if (rawDuration < minDuration - 3) continue;
-      const start = Math.max(0, first.start - 0.12);
-      const end = Math.min(duration, last.end + 0.28);
+
+      // Snap outward to complete sentence boundaries. Two steps is enough to
+      // catch "so, basically..." plus the sentence it refers back to without
+      // swallowing the whole stream.
+      let firstIndex = i;
+      let lastIndex = j;
+      for (let step = 0; step < 2; step++) {
+        const opening = units[firstIndex]!;
+        const prev = units[firstIndex - 1];
+        if (!prev || !openingNeedsContext(opening)) break;
+        if (opening.start - prev.end > 1.8) break;
+        if (units[lastIndex]!.end - prev.start > maxDuration) break;
+        firstIndex -= 1;
+      }
+      for (let step = 0; step < 2; step++) {
+        const closing = units[lastIndex]!;
+        const next = units[lastIndex + 1];
+        if (!next || !endingNeedsContext(closing)) break;
+        if (next.start - closing.end > 1.8) break;
+        if (next.end - units[firstIndex]!.start > maxDuration) break;
+        lastIndex += 1;
+      }
+
+      const start = Math.max(0, units[firstIndex]!.start - 0.12);
+      const end = Math.min(duration, units[lastIndex]!.end + 0.28);
       const finalDuration = end - start;
       if (finalDuration < Math.min(minDuration, 8) || finalDuration > maxDuration + 1) continue;
-      const slice = units.slice(i, j + 1);
+      const slice = units.slice(firstIndex, lastIndex + 1);
       const text = slice.map((unit) => unit.text).join(' ');
       const wordCount = slice.reduce((sum, unit) => sum + unit.words.length, 0);
       if (wordCount < 8) continue;
-      pool.push({ start, end, unit: first, units, firstIndex: i, text, wordCount });
+      const key = `${Math.round(start * 10)}:${Math.round(end * 10)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pool.push({ start, end, unit: slice[0]!, units, firstIndex, text, wordCount });
     }
   }
 
@@ -614,7 +707,7 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
     const { score, parts } = scoreCandidate(entry, audioSeries, chatSeries);
     const phrase = cleanPhrase(entry.unit.text);
     const category = categoryFor(entry.text);
-    const title = titleFor(phrase, category);
+    const title = titleFor(phrase, category, entry.text);
     const hooks = hookOptionsFor(entry.text.slice(0, 280), category, i);
     const hook = hooks[0]?.text || title;
     working.push({
@@ -641,18 +734,25 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
   const count = Math.max(1, Math.min(10, settings.clipCount));
   const selected: WorkingCandidate[] = [];
   const consider = [...working];
+  const bestAvailable = consider.reduce((max, candidate) => Math.max(max, candidate.baseScore), 0);
+  // A clip that only scores by default weights should not pad the library.
+  const minimumScore = Math.max(42, bestAvailable * 0.62);
   while (selected.length < count) {
     let best: { candidate: WorkingCandidate; adjusted: number } | null = null;
     for (const candidate of consider) {
       if (selected.some((other) => other.id === candidate.id)) continue;
-      if (selected.some((other) => overlapRatio(candidate, other) > 0.42)) continue;
+      // Keep clips from covering the same beat. 0.3 means they can share a
+      // lead-in sentence, but not the actual moment.
+      if (selected.some((other) => overlapRatio(candidate, other) > 0.3)) continue;
       if (selected.some((other) => Math.abs(candidate.start - other.start) < 1.5)) continue;
       const maxSimilarity = selected.reduce((max, other) => Math.max(max, jaccard(candidate.textSet, other.textSet)), 0);
-      const proximityPenalty = selected.filter((other) => Math.abs(candidate.start - other.start) < 25).length * 1.6;
-      const adjusted = candidate.baseScore - maxSimilarity * 16 - proximityPenalty;
+      const proximityPenalty = selected.filter((other) => Math.abs(candidate.start - other.start) < 20).length * 1.8;
+      const adjusted = candidate.baseScore - maxSimilarity * 18 - proximityPenalty;
       if (!best || adjusted > best.adjusted) best = { candidate, adjusted };
     }
     if (!best) break;
+    // Always allow one pick, but stop padding once the remaining pool is weak.
+    if (selected.length > 0 && best.adjusted < Math.max(36, minimumScore - 8)) break;
     best.candidate.score = Math.round(best.adjusted * 10) / 10;
     best.candidate.scoreParts.novelty = Math.round((1 - selected.reduce((max, other) => Math.max(max, jaccard(best!.candidate.textSet, other.textSet)), 0)) * 100);
     selected.push(best.candidate);
@@ -705,25 +805,37 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
         if (!clip?.id || seen.has(clip.id)) continue;
         const base = byId.get(clip.id);
         if (!base) continue;
-        if (chosen.some((item) => overlapRatio(item, base) > 0.5 || Math.abs(item.start - base.start) < 2)) continue;
+        if (chosen.some((item) => overlapRatio(item, base) > 0.3 || Math.abs(item.start - base.start) < 2)) continue;
         seen.add(clip.id);
-        const hook = (clip.hook || base.hook).slice(0, 120);
+        const title = sanitizeGeminiText(clip.title, 80) || base.title;
+        const hook = sanitizeGeminiText(clip.hook, 120) || base.hook;
         const hooks = Array.isArray(clip.hooks)
           ? clip.hooks
-              .filter((item) => item && typeof item.text === 'string')
-              .map((item) => ({ text: (item.text || '').slice(0, 120), style: normalizeHookStyle(item.style) }))
+              .map((item) => ({ text: sanitizeGeminiText(item?.text, 120), style: normalizeHookStyle(item?.style) }))
+              .filter((item) => item.text.length >= 8)
               .slice(0, 4)
-          : base.hooks;
-        if (hook && !hooks.some((item) => item.text === hook)) hooks.unshift({ text: hook, style: 'curiosity' });
+          : [];
+        const uniqueHooks: HookOption[] = [];
+        for (const item of [...hooks, ...base.hooks]) {
+          if (!item.text || uniqueHooks.some((existing) => existing.text === item.text)) continue;
+          uniqueHooks.push(item);
+          if (uniqueHooks.length >= 4) break;
+        }
+        if (hook && !uniqueHooks.some((item) => item.text === hook)) uniqueHooks.unshift({ text: hook, style: 'curiosity' });
         chosen.push({
           ...base,
-          title: (clip.title || base.title).slice(0, 80),
+          title,
           hook,
-          hooks,
-          caption: (clip.caption || base.caption).slice(0, 240),
-          hashtags: Array.isArray(clip.hashtags) && clip.hashtags.length ? clip.hashtags.slice(0, 8) : base.hashtags,
-          category: (clip.category || base.category).slice(0, 24),
-          reason: (clip.reason || base.reason).slice(0, 160),
+          hooks: uniqueHooks.slice(0, 4),
+          caption: sanitizeGeminiText(clip.caption, 240) || base.caption,
+          hashtags: Array.isArray(clip.hashtags) && clip.hashtags.length
+            ? clip.hashtags
+                .map((tag) => sanitizeGeminiText(tag, 32))
+                .filter((tag) => /^#[a-z0-9_]{2,30}$/i.test(tag))
+                .slice(0, 8)
+            : base.hashtags,
+          category: sanitizeGeminiText(clip.category, 24) || base.category,
+          reason: sanitizeGeminiText(clip.reason, 160) || base.reason,
           source: 'gemini',
         });
       }
@@ -731,7 +843,9 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
         // Fill any shortfall with the strongest local picks, keeping the timeline covered.
         for (const candidate of [...selected, ...working].sort((a, b) => b.baseScore - a.baseScore)) {
           if (chosen.length >= count) break;
+          if (candidate.baseScore < minimumScore) break;
           if (chosen.some((item) => item.id === candidate.id || Math.abs(item.start - candidate.start) < 1.2)) continue;
+          if (chosen.some((item) => overlapRatio(item, candidate) > 0.3)) continue;
           chosen.push({ ...candidate, source: 'local' });
         }
         selected.length = 0;
@@ -777,16 +891,20 @@ function normalizeHookStyle(style?: string): HookOption['style'] {
   return allowed.includes(style as HookOption['style']) ? (style as HookOption['style']) : 'curiosity';
 }
 
+/** Gemini sometimes echoes ASR stage directions; never let those reach the UI. */
+function sanitizeGeminiText(value: unknown, max: number): string {
+  if (typeof value !== 'string') return '';
+  return stripSoundTags(value.replace(/\s+/g, ' ').trim()).slice(0, max).trim();
+}
+
 function buildPrompt(
   candidates: WorkingCandidate[],
   context: { count: number; minDuration: number; maxDuration: number; platform: PlatformId; mode: AiMode; duration: number },
 ): string {
   const lines = candidates.map((candidate) => {
-    const text =
-      candidate.hook && candidate.hook !== candidate.title
-        ? candidate.title
-        : candidate.title;
-    return `- id: ${candidate.id} | ${Math.round(candidate.start)}s–${Math.round(candidate.end)}s (${Math.round(candidate.end - candidate.start)}s) | local category: ${candidate.category} | opening: ${JSON.stringify(text)}`;
+    const firstSentence = candidate.excerpt.split(/(?<=[.!?…])\s+/)[0] || candidate.excerpt;
+    const opening = stripSoundTags(firstSentence).replace(/\s+/g, ' ').trim().slice(0, 110);
+    return `- id: ${candidate.id} | ${Math.round(candidate.start)}s–${Math.round(candidate.end)}s (${Math.round(candidate.end - candidate.start)}s) | local category: ${candidate.category} | opens with: ${JSON.stringify(opening)}`;
   });
 
   const detail = candidates
@@ -808,13 +926,16 @@ ${detail}
 
 RULES
 - Choose only ids from the shortlist. Never invent ids or timestamps.
-- Prefer self-contained moments: a clear setup, tension, and payoff. Avoid clips that begin mid-thought.
+- Every clip MUST stand on its own: a clear setup in the first sentence, the actual beat, and a payoff. A cold viewer must understand it without the rest of the stream.
+- Never start a clip on "it", "that", "this", "so", "and", "but", "like" or any dangling reference unless the selected range already includes the line it refers to. The local range has been snapped to sentences, so trust it over a mid-thought timestamp.
+- Never end a clip on a dangling word such as "and", "because" or "the". Prefer the end of a complete sentence.
 - Rank by scroll-stopping power for a cold viewer, not by importance to the stream.
-- Do not select two clips covering the same beat.
-- Write hooks like a streamer editor: max 8 words, one natural emoji, no clickbait that the clip does not deliver, no quotation marks.
-- Titles: max 7 words, title case, no emoji.
+- Do not select two clips covering the same beat or the same joke. If two ids overlap heavily, pick only the stronger one.
+- Write hooks like a streamer editor: max 8 words, one natural iPhone-style emoji (😭 😳 🔥 💀 👀), no quotation marks, no trailing "and"/"but"/"so", and nothing that the clip does not deliver.
+- Titles: max 7 words, title case, no emoji, no generic filler like "The moment everything changed". Quote or paraphrase the actual spoken line when possible.
 - Captions: one sentence plus a short CTA. 3–6 hashtags.
-- Return between 1 and ${context.count} clips (fewer is allowed only if the rest are genuinely weak).
+- NEVER include ASR stage directions or sound labels anywhere: no "(gunfire)", "[Music]", "*laughs*", "♪", "applause" or similar. Only speakable words.
+- Return between 1 and ${context.count} clips (fewer is allowed only if the rest are genuinely weak; never pad with a clip that does not make sense from start to finish).
 
 Return JSON only:
 {"clips":[{"id":"cand_001","title":"...","hook":"...","hooks":[{"text":"...","style":"curiosity"},{"text":"...","style":"stakes"},{"text":"...","style":"question"}],"caption":"...","hashtags":["#shorts"],"category":"funny","reason":"why this clip works"}]}`;

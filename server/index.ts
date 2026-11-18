@@ -72,7 +72,7 @@ const HOOK_IDS = new Set(HOOK_STYLES.map((style) => style.id));
 const AI_MODES = new Set(['smart', 'full', 'off']);
 const PACING = new Set(['original', 'balanced', 'tight']);
 const QUALITY = new Set(['fast', 'balanced', 'high']);
-const REFRAME = new Set(['smart', 'center', 'blur']);
+const REFRAME = new Set(['smart', 'split', 'center', 'blur']);
 const ASR = new Set(['base.en', 'base', 'small.en', 'tiny.en']);
 const PLATFORM_IDS = new Set(PLATFORMS.map((platform) => platform.id));
 
@@ -584,6 +584,16 @@ function registerRoutes(app: FastifyInstance): void {
     }
     if (typeof body.caption === 'string') patch.caption = body.caption;
     if (Array.isArray(body.hashtags)) patch.hashtags = body.hashtags.filter((tag): tag is string => typeof tag === 'string');
+    if (Array.isArray(body.subtitles)) {
+      patch.subtitles = body.subtitles
+        .filter((cue): cue is Record<string, unknown> => Boolean(cue) && typeof cue === 'object')
+        .map((cue) => ({
+          start: Number(cue.start) || 0,
+          end: Number(cue.end) || 0,
+          text: typeof cue.text === 'string' ? cue.text : '',
+        }))
+        .slice(0, 300);
+    }
     if (typeof body.framing === 'string' && REFRAME.has(body.framing)) patch.framing = body.framing as ClipRecord['framing'];
     if (typeof body.start === 'number') patch.start = body.start;
     if (typeof body.end === 'number') patch.end = body.end;
@@ -686,6 +696,90 @@ function registerRoutes(app: FastifyInstance): void {
     if (query.starred === '1') clips = clips.filter(({ clip }) => clip.starred);
     if (query.campaign) clips = clips.filter(({ project }) => project.campaignId === query.campaign);
     return clips;
+  });
+
+  app.post('/api/library/bulk-delete', async (request) => {
+    const body = (request.body || {}) as { clipIds?: unknown; ids?: unknown };
+    const raw = Array.isArray(body.clipIds) ? body.clipIds : Array.isArray(body.ids) ? body.ids : [];
+    const ids = [...new Set(raw.filter((id): id is string => typeof id === 'string' && id.trim().length > 2))].slice(0, 300);
+    if (!ids.length) throw new HttpError(400, 'Choose at least one clip to delete.');
+    let deleted = 0;
+    const missing: string[] = [];
+    for (const clipId of ids) {
+      const found = await findClipAsync(clipId);
+      if (!found) {
+        missing.push(clipId);
+        continue;
+      }
+      try {
+        await deleteClip(found.projectId, clipId);
+        deleted += 1;
+      } catch {
+        missing.push(clipId);
+      }
+    }
+    return { deleted, missing };
+  });
+
+  app.get('/api/library/export', async (request, reply) => {
+    const query = request.query as { ids?: string; starred?: string };
+    const wanted = new Set(
+      (query.ids || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean),
+    );
+    let clips = await store.listClips();
+    if (wanted.size) clips = clips.filter(({ clip }) => wanted.has(clip.id));
+    if (!wanted.size && query.starred === '1') clips = clips.filter(({ clip }) => clip.starred);
+    clips = clips.filter(({ clip }) => clip.status === 'ready' && existingFile(clip.files.final));
+    if (!clips.length) throw new HttpError(400, 'There are no finished clips to download.');
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="teraclip-library-${new Date().toISOString().slice(0, 10)}.zip"`,
+      'Cache-Control': 'no-store',
+    });
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('warning', (error) => log.warn('zip warning', error));
+    archive.on('error', (error) => log.error('zip failed', error));
+    archive.pipe(reply.raw);
+    const used = new Set<string>();
+    for (const { clip, project } of clips) {
+      let base = `${slugify(project.title)}-${String(clip.index + 1).padStart(2, '0')}`;
+      if (used.has(base)) base = `${base}-${clip.id.slice(-4)}`;
+      used.add(base);
+      const final = existingFile(clip.files.final);
+      if (final) archive.file(final, { name: `${base}.mp4` });
+      const thumb = existingFile(clip.files.thumb);
+      if (thumb) archive.file(thumb, { name: `${base}.jpg` });
+      const srt = existingFile(clip.files.srt);
+      if (srt) archive.file(srt, { name: `${base}.srt` });
+      const ass = existingFile(clip.files.ass);
+      if (ass) archive.file(ass, { name: `${base}.ass` });
+      const campaign = project.campaignId ? store.getCampaign(project.campaignId) : undefined;
+      archive.append(postingKit(project.title, clip, campaign), { name: `${base}.txt` });
+    }
+    archive.append(
+      JSON.stringify(
+        clips.map(({ clip, project }) => ({
+          id: clip.id,
+          project: project.title,
+          title: clip.title,
+          hook: clip.hook,
+          caption: clip.caption,
+          hashtags: clip.hashtags,
+          start: clip.start,
+          end: clip.end,
+          score: clip.score,
+        })),
+        null,
+        2,
+      ),
+      { name: 'library.json' },
+    );
+    await archive.finalize();
   });
 
   app.get('/api/library/:clipId/download', async (request, reply) => {

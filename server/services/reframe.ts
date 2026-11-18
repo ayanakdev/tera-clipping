@@ -131,6 +131,10 @@ interface FrameTarget {
   t: number;
   cx: number | null;
   cy: number | null;
+  /** normalized face-box width, 0..1 */
+  fw: number | null;
+  /** normalized face-box height, 0..1 */
+  fh: number | null;
   faces: number;
 }
 
@@ -223,9 +227,7 @@ interface CropGeometry {
   centerY: number;
 }
 
-function geometryFor(sourceWidth: number, sourceHeight: number, aspect: AspectRatio): CropGeometry {
-  const target = ASPECT_SIZES[aspect];
-  const targetAspect = target.width / target.height;
+function geometryForRatio(sourceWidth: number, sourceHeight: number, targetAspect: number): CropGeometry {
   const sourceAspect = sourceWidth / sourceHeight;
   let cropW: number;
   let cropH: number;
@@ -246,6 +248,11 @@ function geometryFor(sourceWidth: number, sourceHeight: number, aspect: AspectRa
     centerX: (sourceWidth - cropW) / 2,
     centerY: (sourceHeight - cropH) / 2,
   };
+}
+
+function geometryFor(sourceWidth: number, sourceHeight: number, aspect: AspectRatio): CropGeometry {
+  const target = ASPECT_SIZES[aspect];
+  return geometryForRatio(sourceWidth, sourceHeight, target.width / target.height);
 }
 
 function pickPrimary(
@@ -283,7 +290,7 @@ interface FaceAnalysis {
   ys: number[];
 }
 
-async function analyzeFaces(opts: ReframeOptions, geometry: CropGeometry): Promise<FaceAnalysis> {
+async function detectTargets(opts: ReframeOptions): Promise<FrameTarget[]> {
   const targets: FrameTarget[] = [];
   const estimatedFrames = Math.max(1, Math.ceil(opts.duration * SAMPLE_FPS));
   let anchor: { cx: number; area: number } | null = null;
@@ -304,6 +311,8 @@ async function analyzeFaces(opts: ReframeOptions, geometry: CropGeometry): Promi
           t: frame.t - opts.start,
           cx: primary?.cx ?? null,
           cy: primary?.cy ?? null,
+          fw: primary ? primary.w / opts.sourceWidth : null,
+          fh: primary ? primary.h / opts.sourceHeight : null,
           faces: detections.length,
         });
         opts.onProgress?.(Math.min(1, targets.length / estimatedFrames));
@@ -313,7 +322,15 @@ async function analyzeFaces(opts: ReframeOptions, geometry: CropGeometry): Promi
     if ((error as Error).name === 'AbortError') throw error;
     console.warn('[reframe] face sampling failed, using centre crop:', (error as Error).message);
   }
+  return targets;
+}
 
+function smoothTargets(
+  targets: FrameTarget[],
+  geometry: CropGeometry,
+  opts: ReframeOptions,
+  yBias = 0.06,
+): FaceAnalysis {
   if (!targets.length) {
     const faceSamples: FaceSample[] = [
       {
@@ -334,10 +351,7 @@ async function analyzeFaces(opts: ReframeOptions, geometry: CropGeometry): Promi
   }
 
   // Median-of-3 before smoothing removes single-frame landmark spikes.
-  const rawX: Array<number | null> = targets.map((target, i) => {
-    if (target.cx !== null) return target.cx;
-    return null;
-  });
+  const rawX: Array<number | null> = targets.map((target) => target.cx);
   const rawY: Array<number | null> = targets.map((target) => target.cy);
   const filteredX = rawX.map((_, i) => median([rawX[i - 1] ?? null, rawX[i] ?? null, rawX[i + 1] ?? null]));
   const filteredY = rawY.map((_, i) => median([rawY[i - 1] ?? null, rawY[i] ?? null, rawY[i + 1] ?? null]));
@@ -380,7 +394,7 @@ async function analyzeFaces(opts: ReframeOptions, geometry: CropGeometry): Promi
         }
       }
       if (targetY !== null) {
-        const desiredY = targetY + geometry.cropH * 0.06;
+        const desiredY = targetY + geometry.cropH * yBias;
         if (Math.abs(desiredY - smoothY) > opts.sourceHeight * 0.3) {
           smoothY = desiredY;
           velocityY = 0;
@@ -419,10 +433,17 @@ async function analyzeFaces(opts: ReframeOptions, geometry: CropGeometry): Promi
     w: geometry.cropW / opts.sourceWidth,
     y: (ys[i]! + geometry.cropH / 2) / opts.sourceHeight,
     h: geometry.cropH / opts.sourceHeight,
+    fw: targets[i]?.fw ?? undefined,
+    fh: targets[i]?.fh ?? undefined,
     faces: targets[i]?.faces ?? 0,
   }));
 
   return { faceSamples, times, xs, ys };
+}
+
+async function analyzeFaces(opts: ReframeOptions, geometry: CropGeometry): Promise<FaceAnalysis> {
+  const targets = await detectTargets(opts);
+  return smoothTargets(targets, geometry, opts);
 }
 
 function cropFilter(
@@ -448,6 +469,84 @@ function centreFilter(geometry: CropGeometry, outputWidth: number, outputHeight:
   return `crop=${geometry.cropW}:${geometry.cropH}:${Math.round(geometry.centerX)}:${Math.round(geometry.centerY)},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1`;
 }
 
+const SPLIT_TOP_RATIO = 0.62;
+
+/**
+ * Gameplay + facecam vertical layout. The game keeps the top 62% of the
+ * frame (centre-cropped to fill it) while the tracked webcam panel fills the
+ * bottom 38%. This is the standard stacked Shorts/TikTok stream layout.
+ */
+function splitFilter(
+  gameGeometry: CropGeometry,
+  camGeometry: CropGeometry,
+  camTimes: number[],
+  camXs: number[],
+  camYs: number[],
+  outputWidth: number,
+  outputHeight: number,
+): string {
+  const topHeight = Math.round(outputHeight * SPLIT_TOP_RATIO);
+  const bottomHeight = outputHeight - topHeight;
+  const xExpr = axisExpression(
+    simplify(camTimes.map((t, i) => ({ t, v: camXs[i]! })), Math.max(1, camGeometry.cropW * 0.006)),
+    0,
+    camGeometry.maxX,
+  );
+  const yExpr = axisExpression(
+    simplify(camTimes.map((t, i) => ({ t, v: camYs[i]! })), Math.max(1, camGeometry.cropH * 0.006)),
+    0,
+    camGeometry.maxY,
+  );
+  const camCrop = `crop=${camGeometry.cropW}:${camGeometry.cropH}:'${xExpr}':'${yExpr}'`;
+  return [
+    'split=2[game][cam]',
+    `[game]crop=${gameGeometry.cropW}:${gameGeometry.cropH}:${Math.round(gameGeometry.centerX)}:${Math.round(gameGeometry.centerY)},scale=${outputWidth}:${topHeight}:flags=lanczos,setsar=1[top]`,
+    `[cam]${camCrop},scale=${outputWidth}:${bottomHeight}:flags=lanczos,setsar=1,drawbox=x=0:y=0:w=iw:h=3:color=black@0.55:t=fill[bottom]`,
+    '[top][bottom]vstack=inputs=2,setsar=1',
+  ].join(';');
+}
+
+function camGeometryForFaceWidths(
+  sourceWidth: number,
+  sourceHeight: number,
+  faceWidths: number[],
+  targetAspect: number,
+): CropGeometry {
+  const clean = faceWidths.filter((width) => Number.isFinite(width) && width > 4).sort((a, b) => a - b);
+  const faceWidth = clean.length ? clean[Math.floor(clean.length / 2)]! : sourceWidth * 0.26;
+  let cropW = clamp(faceWidth * 3.2, sourceWidth * 0.18, sourceWidth * 0.68);
+  let cropH = cropW / targetAspect;
+  const maxH = sourceHeight * 0.82;
+  if (cropH > maxH) {
+    cropH = maxH;
+    cropW = cropH * targetAspect;
+  }
+  cropW = Math.max(2, Math.min(sourceWidth, Math.round(cropW)));
+  cropH = Math.max(2, Math.min(sourceHeight, Math.round(cropH)));
+  return {
+    cropW,
+    cropH,
+    maxX: Math.max(0, sourceWidth - cropW),
+    maxY: Math.max(0, sourceHeight - cropH),
+    centerX: (sourceWidth - cropW) / 2,
+    centerY: (sourceHeight - cropH) / 2,
+  };
+}
+
+function camGeometryForTargets(
+  sourceWidth: number,
+  sourceHeight: number,
+  targets: FrameTarget[],
+  targetAspect: number,
+): CropGeometry {
+  return camGeometryForFaceWidths(
+    sourceWidth,
+    sourceHeight,
+    targets.map((target) => (target.fw ? target.fw * sourceWidth : 0)),
+    targetAspect,
+  );
+}
+
 function blurFilter(outputWidth: number, outputHeight: number): string {
   return [
     `split=2[bg][fg]`,
@@ -462,6 +561,28 @@ export async function planReframe(opts: ReframeOptions): Promise<ReframePlan> {
 
   if (opts.mode === 'blur') {
     return { mode: 'blur', filter: blurFilter(opts.outputWidth, opts.outputHeight), faceSamples: [] };
+  }
+
+  if (opts.mode === 'split') {
+    if (opts.sourceWidth <= 16 || opts.sourceHeight <= 16) {
+      return { mode: 'center', filter: centreFilter(geometry, opts.outputWidth, opts.outputHeight), faceSamples: [] };
+    }
+    const topHeight = Math.round(opts.outputHeight * SPLIT_TOP_RATIO);
+    const bottomHeight = opts.outputHeight - topHeight;
+    const gameGeometry = geometryForRatio(opts.sourceWidth, opts.sourceHeight, opts.outputWidth / topHeight);
+    const targets = await detectTargets(opts);
+    const camGeometry = camGeometryForTargets(
+      opts.sourceWidth,
+      opts.sourceHeight,
+      targets,
+      opts.outputWidth / bottomHeight,
+    );
+    const tracked = smoothTargets(targets, camGeometry, opts, 0.14);
+    return {
+      mode: 'split',
+      filter: splitFilter(gameGeometry, camGeometry, tracked.times, tracked.xs, tracked.ys, opts.outputWidth, opts.outputHeight),
+      faceSamples: tracked.faceSamples,
+    };
   }
 
   if (opts.mode === 'center') {
@@ -512,4 +633,46 @@ export function cropExpressionForSamples(
     ys.push(ys[ys.length - 1] ?? geometry.centerY);
   }
   return cropFilter(geometry, times, xs, ys, outputWidth, outputHeight);
+}
+
+/**
+ * Rebuild the split layout from stored face samples (edit re-renders). The
+ * webcam crop size is derived from the stored face-box widths so a re-render
+ * does not need to detect faces again.
+ */
+export function splitExpressionForSamples(
+  faceSamples: FaceSample[] | undefined,
+  sourceWidth: number,
+  sourceHeight: number,
+  outputWidth: number,
+  outputHeight: number,
+  duration: number,
+): string {
+  const topHeight = Math.round(outputHeight * SPLIT_TOP_RATIO);
+  const bottomHeight = outputHeight - topHeight;
+  const gameGeometry = geometryForRatio(sourceWidth, sourceHeight, outputWidth / topHeight);
+  const camGeometry = camGeometryForFaceWidths(
+    sourceWidth,
+    sourceHeight,
+    (faceSamples || []).map((sample) => (sample.fw ? sample.fw * sourceWidth : 0)),
+    outputWidth / bottomHeight,
+  );
+  const times: number[] = [];
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const sample of faceSamples || []) {
+    times.push(clamp(sample.t, 0, duration));
+    xs.push(clamp(sample.x * sourceWidth - camGeometry.cropW / 2, 0, camGeometry.maxX));
+    ys.push(clamp((sample.y ?? 0.5) * sourceHeight - camGeometry.cropH / 2, 0, camGeometry.maxY));
+  }
+  if (!times.length) {
+    times.push(0, duration);
+    xs.push(camGeometry.centerX, camGeometry.centerX);
+    ys.push(camGeometry.centerY, camGeometry.centerY);
+  } else if (times[times.length - 1]! < duration - 0.01) {
+    times.push(duration);
+    xs.push(xs[xs.length - 1] ?? camGeometry.centerX);
+    ys.push(ys[ys.length - 1] ?? camGeometry.centerY);
+  }
+  return splitFilter(gameGeometry, camGeometry, times, xs, ys, outputWidth, outputHeight);
 }

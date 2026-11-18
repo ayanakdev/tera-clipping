@@ -436,6 +436,7 @@ export default function Settings() {
                   onChange={(value) => set('defaultReframe', value as AppSettings['defaultReframe'])}
                 >
                   <option value="smart">Smart · tracks faces</option>
+                  <option value="split">Gameplay + cam · stacked</option>
                   <option value="center">Center crop</option>
                   <option value="blur">Blur fill</option>
                 </Select>

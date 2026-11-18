@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
+  Archive,
+  CheckSquare,
+  Download,
   Film,
   Filter,
   FolderOpen,
@@ -9,8 +12,10 @@ import {
   Search,
   SlidersHorizontal,
   Sparkles,
+  Square,
   Star,
   Trash2,
+  X,
 } from 'lucide-react';
 import type { Campaign, ClipRecord, LibraryClip } from '@shared/types';
 import { PLATFORMS } from '@shared/platforms';
@@ -50,6 +55,9 @@ export default function Library() {
   const [kitText, setKitText] = useState('');
   const [kitLoading, setKitLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebounced(query.trim()), 320);
@@ -92,6 +100,27 @@ export default function Library() {
   }, [clips, sort]);
 
   const filtersActive = Boolean(query || platform || campaign || starredOnly);
+
+  useEffect(() => {
+    setSelected(new Set());
+  }, [debounced, platform, campaign, starredOnly, sort]);
+
+  const selectedEntries = sorted.filter((entry) => selected.has(entry.clip.id));
+  const allVisibleSelected = sorted.length > 0 && selectedEntries.length === sorted.length;
+  const toggleSelect = (clipId: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(clipId)) next.delete(clipId);
+      else next.add(clipId);
+      return next;
+    });
+  };
+  const toggleSelectAll = () => {
+    setSelected((current) => {
+      if (sorted.every((entry) => current.has(entry.clip.id))) return new Set();
+      return new Set(sorted.map((entry) => entry.clip.id));
+    });
+  };
 
   const star = async (entry: LibraryClip) => {
     setBusyId(entry.clip.id);
@@ -136,12 +165,72 @@ export default function Library() {
     try {
       await api.deleteLibraryClip(entry.clip.id);
       notify({ tone: 'info', title: 'Clip deleted', message: entry.clip.title });
+      setSelected((current) => {
+        const next = new Set(current);
+        next.delete(entry.clip.id);
+        return next;
+      });
       void reload(true);
     } catch (error) {
       notify({ tone: 'error', title: 'Could not delete the clip', message: (error as Error).message });
     } finally {
       setBusyId(null);
     }
+  };
+
+  const bulkRemove = async () => {
+    const ids = selectedEntries.map((entry) => entry.clip.id);
+    if (!ids.length) return;
+    const label = `${ids.length} clip${ids.length === 1 ? '' : 's'}`;
+    const ok = await confirm({
+      title: `Delete ${label}?`,
+      body: 'The rendered files, captions and thumbnails are removed from this laptop. Their projects stay in the library.',
+      confirmLabel: `Delete ${label}`,
+    });
+    if (!ok) return;
+    setBulkBusy(true);
+    try {
+      const result = await api.bulkDeleteLibrary(ids);
+      notify({
+        tone: 'info',
+        title: `${result.deleted} clip${result.deleted === 1 ? '' : 's'} deleted`,
+        message: result.missing.length
+          ? `${result.missing.length} could not be found and were left alone.`
+          : 'The library is tidier already.',
+      });
+      setSelected(new Set());
+      void reload(true);
+    } catch (error) {
+      notify({ tone: 'error', title: 'Could not delete the clips', message: (error as Error).message });
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const downloadSelected = () => {
+    if (!selectedEntries.length) return;
+    for (const entry of selectedEntries) {
+      const link = document.createElement('a');
+      link.href = api.libraryDownloadUrl(entry.clip.id);
+      link.download = '';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
+    notify({
+      tone: 'info',
+      title: `Downloading ${plural(selectedEntries.length, 'clip')}`,
+      message: 'Your browser may ask where to save them.',
+    });
+  };
+
+  const downloadZip = () => {
+    if (!selectedEntries.length) return;
+    window.open(
+      api.libraryExportUrl(selectedEntries.map((entry) => entry.clip.id)),
+      '_blank',
+      'noopener',
+    );
   };
 
   const clearFilters = () => {
@@ -239,10 +328,72 @@ export default function Library() {
             Clear
           </Button>
         ) : null}
+        <Button
+          variant={selectionMode ? 'soft' : 'ghost'}
+          size="sm"
+          icon={selectionMode ? CheckSquare : Square}
+          onClick={() => {
+            setSelectionMode((current) => !current);
+            setSelected(new Set());
+          }}
+        >
+          {selectionMode ? 'Selecting' : 'Select'}
+        </Button>
         <span className="library-count">
           {loading ? 'Reading the shelf…' : `${plural(sorted.length, 'clip')} · saved locally`}
         </span>
       </div>
+
+      {selectionMode ? (
+        <div className="bulk-bar">
+          <span className="bulk-count">
+            <CheckSquare size={14} /> {selectedEntries.length} selected
+          </span>
+          <Button variant="ghost" size="sm" icon={allVisibleSelected ? X : CheckSquare} onClick={toggleSelectAll}>
+            {allVisibleSelected ? 'Clear all' : 'Select all'}
+          </Button>
+          <div className="bulk-actions">
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={Download}
+              disabled={!selectedEntries.length}
+              onClick={downloadSelected}
+            >
+              Download all
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={Archive}
+              disabled={!selectedEntries.length}
+              onClick={downloadZip}
+            >
+              Download ZIP
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              icon={Trash2}
+              loading={bulkBusy}
+              disabled={!selectedEntries.length || bulkBusy}
+              onClick={() => void bulkRemove()}
+            >
+              Delete
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setSelectionMode(false);
+                setSelected(new Set());
+              }}
+            >
+              Done
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {starredOnly && sorted.length ? (
         <div className="library-selection">
@@ -269,32 +420,58 @@ export default function Library() {
           {sorted.map((entry) => {
             const campaignEntry = entry.project.campaignId ? campaignById.get(entry.project.campaignId) : undefined;
             return (
-              <div key={entry.clip.id} style={{ minWidth: 0 }}>
+              <div
+                key={entry.clip.id}
+                className={cx(
+                  'library-select-wrap',
+                  selectionMode && 'is-selecting',
+                  selected.has(entry.clip.id) && 'is-selected',
+                )}
+              >
+                {selectionMode ? (
+                  <button
+                    type="button"
+                    className={cx('clip-select-box', selected.has(entry.clip.id) && 'is-on')}
+                    aria-pressed={selected.has(entry.clip.id)}
+                    aria-label={selected.has(entry.clip.id) ? 'Deselect clip' : 'Select clip'}
+                    onClick={() => toggleSelect(entry.clip.id)}
+                  >
+                    {selected.has(entry.clip.id) ? <CheckSquare size={14} /> : <Square size={14} />}
+                  </button>
+                ) : null}
                 <ClipCard
                   clip={entry.clip}
                   projectTitle={entry.project.title}
                   showProject
-                  onOpen={() => navigate(`/project/${entry.clip.projectId}?clip=${entry.clip.id}`)}
-                  onStar={() => void star(entry)}
-                  onDownload={() =>
-                    window.open(api.libraryDownloadUrl(entry.clip.id), '_blank', 'noopener')
+                  onOpen={() =>
+                    selectionMode
+                      ? toggleSelect(entry.clip.id)
+                      : navigate(`/project/${entry.clip.projectId}?clip=${entry.clip.id}`)
                   }
-                  onKit={() => void openKit(entry)}
+                  onStar={selectionMode ? undefined : () => void star(entry)}
+                  onDownload={
+                    selectionMode
+                      ? undefined
+                      : () => window.open(api.libraryDownloadUrl(entry.clip.id), '_blank', 'noopener')
+                  }
+                  onKit={selectionMode ? undefined : () => void openKit(entry)}
                   actions={
-                    <>
-                      {busyId === entry.clip.id ? (
-                        <span className="mini-action" aria-label="Working">
-                          <Spinner size={13} />
-                        </span>
-                      ) : (
-                        <IconButton
-                          icon={Trash2}
-                          label="Delete clip"
-                          className="mini-action"
-                          onClick={() => void remove(entry)}
-                        />
-                      )}
-                    </>
+                    selectionMode ? undefined : (
+                      <>
+                        {busyId === entry.clip.id ? (
+                          <span className="mini-action" aria-label="Working">
+                            <Spinner size={13} />
+                          </span>
+                        ) : (
+                          <IconButton
+                            icon={Trash2}
+                            label="Delete clip"
+                            className="mini-action"
+                            onClick={() => void remove(entry)}
+                          />
+                        )}
+                      </>
+                    )
                   }
                 />
                 <div className="clip-meta" style={{ marginTop: 4 }}>
@@ -355,6 +532,10 @@ export default function Library() {
                   <Badge tone="violet">{clock(kitClip.clip.duration)}</Badge>
                   <Badge tone="neutral">{kitClip.project.title}</Badge>
                 </div>
+                <p className="kit-help">
+                  Everything you need to publish this clip — title, top hook, caption, hashtags, length and any
+                  campaign rules — in one copyable block. It does not change the video.
+                </p>
               </div>
             </div>
             {kitLoading ? (

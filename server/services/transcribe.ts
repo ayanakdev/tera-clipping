@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { AsrModelId, ClipSettings, Transcript, TranscriptSegment, Word } from '../../shared/types';
+import { isSpeakableToken, stripSoundTags } from '../../shared/utils';
 import { PATHS } from '../config';
 import { log } from '../lib/logger';
 import { runProcess } from '../lib/process';
@@ -45,7 +46,7 @@ function stripSpecial(text: string): string {
 }
 
 function tidyWord(text: string): string {
-  return stripSpecial(text).replace(/^[\s-]+/, '').trim();
+  return stripSoundTags(stripSpecial(text)).replace(/^[\s-]+/, '').trim();
 }
 
 function joinWords(words: string[]): string {
@@ -71,7 +72,8 @@ function parseWhisperJson(data: WhisperJson, offset: number, totalDuration: numb
     const confidence = probs.length ? probs.reduce((a, b) => a + b, 0) / probs.length : 1;
 
     // A word segment normally contains one word; if whisper emitted more, distribute the timing.
-    const parts = rawText.split(/\s+/).filter(Boolean);
+    const parts = rawText.split(/\s+/).filter((part) => part && isSpeakableToken(part));
+    if (!parts.length) continue;
     const span = Math.max(0.06, end - start);
     if (parts.length === 1) {
       words.push({ text: parts[0]!, start, end: Math.max(start + 0.06, end), p: confidence });
@@ -142,6 +144,35 @@ function buildSegments(words: Word[]): TranscriptSegment[] {
   }
   flush();
   return segments;
+}
+
+/**
+ * Cached transcripts created before sound-tag filtering still contain words
+ * such as `(gunfire)`. Clean them in place so a Replan fixes an old project
+ * without paying for Whisper again.
+ */
+export function sanitizeTranscript(input: Transcript): { transcript: Transcript; changed: boolean } {
+  let changed = false;
+  const words: Word[] = [];
+  for (const word of input.words || []) {
+    const raw = String(word.text || '');
+    const text = stripSoundTags(raw).trim();
+    if (!text || !isSpeakableToken(text)) {
+      changed = true;
+      continue;
+    }
+    if (text !== raw) changed = true;
+    words.push({ ...word, text });
+  }
+  if (!changed) return { transcript: input, changed: false };
+  return {
+    transcript: {
+      ...input,
+      words,
+      segments: buildSegments(words),
+    },
+    changed: true,
+  };
 }
 
 async function splitWav(file: string, outDir: string, duration: number, signal?: AbortSignal): Promise<Array<{ path: string; offset: number; duration: number }>> {
@@ -259,9 +290,14 @@ export async function transcribeProject(
   const transcriptPath = path.join(options.projectDir, 'transcript.json');
   if (!options.force && fs.existsSync(transcriptPath)) {
     try {
-      const existing = JSON.parse(await fsp.readFile(transcriptPath, 'utf8')) as Transcript;
-      if (existing.words?.length && Math.abs(existing.duration - options.duration) < 2) {
-        return { transcript: existing, cached: true };
+      const raw = JSON.parse(await fsp.readFile(transcriptPath, 'utf8')) as Transcript;
+      if (raw.words?.length && Math.abs(raw.duration - options.duration) < 2) {
+        const cleaned = sanitizeTranscript(raw);
+        if (cleaned.changed) {
+          await fsp.writeFile(transcriptPath, JSON.stringify(cleaned.transcript, null, 2), 'utf8');
+          log.info(`cleaned ${raw.words.length - cleaned.transcript.words.length} sound tag(s) from cached transcript`);
+        }
+        return { transcript: cleaned.transcript, cached: true };
       }
     } catch {
       /* re-transcribe */

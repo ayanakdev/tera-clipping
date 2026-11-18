@@ -18,7 +18,12 @@ export type CaptionPresetId = 'tera-box' | 'hormozi' | 'purple-pop' | 'beast' | 
 
 export type HookStyleId = 'white' | 'black' | 'purple' | 'none';
 
-export type ReframeMode = 'smart' | 'center' | 'blur';
+/**
+ * `smart` tracks the primary face and crops to it. `split` keeps the full
+ * gameplay frame on top and adds a tracked face-camera crop underneath, which
+ * is the layout most stream clips use on Shorts/TikTok/Reels.
+ */
+export type ReframeMode = 'smart' | 'split' | 'center' | 'blur';
 
 export type PacingMode = 'original' | 'balanced' | 'tight';
 
@@ -66,6 +71,13 @@ export interface TranscriptSegment {
   end: number;
   text: string;
   words: Word[];
+}
+
+/** A user-editable subtitle line. Times are relative to the clip start. */
+export interface SubtitleCue {
+  start: number;
+  end: number;
+  text: string;
 }
 
 export interface Transcript {
@@ -145,6 +157,10 @@ export interface FaceSample {
   y?: number;
   /** normalized crop height relative to source height, 0..1 (optional) */
   h?: number;
+  /** normalized width of the detected face box, 0..1 (optional) */
+  fw?: number;
+  /** normalized height of the detected face box, 0..1 (optional) */
+  fh?: number;
   /** total faces detected at this instant */
   faces: number;
 }
@@ -172,6 +188,8 @@ export interface ClipRecord {
   hashtags: string[];
   transcript: string;
   words: Word[];
+  /** User-editable subtitle lines, relative to the clip start. */
+  subtitles?: SubtitleCue[];
   score: number;
   scoreParts: ScoreParts;
   reason: string;

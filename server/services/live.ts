@@ -186,7 +186,7 @@ function pushHeat(runtime: Runtime, t: number, patch: Partial<HeatPoint>): HeatP
     runtime.heat = runtime.heat.slice(-MAX_HEAT_POINTS);
   }
   Object.assign(point, patch);
-  point.heat = Math.round(clamp01((point.audio ?? 0.2) * 0.55 + Math.min(1, (point.chat ?? 0) / 8) * 0.45) * 100) / 100;
+  point.heat = Math.round(clamp01((point.audio ?? 0.2) * 0.55 + Math.min(1, (point.chat ?? 0) / 12) * 0.45) * 100) / 100;
   return point;
 }
 
@@ -195,17 +195,48 @@ function mirrorHeat(runtime: Runtime): void {
   runtime.session.chatHeat = runtime.heat.map((point) => ({ t: point.t, chat: point.chat, heat: point.heat }));
 }
 
+function stats(values: number[]): { mean: number; sd: number; p90: number } {
+  const clean = values.filter((value) => Number.isFinite(value));
+  if (!clean.length) return { mean: 0, sd: 0, p90: 0 };
+  const mean = clean.reduce((sum, value) => sum + value, 0) / clean.length;
+  const variance = clean.reduce((sum, value) => sum + (value - mean) ** 2, 0) / clean.length;
+  const sorted = [...clean].sort((a, b) => a - b);
+  return {
+    mean,
+    sd: Math.sqrt(variance),
+    p90: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))] ?? mean,
+  };
+}
+
+/**
+ * Rolling z-score instead of fixed thresholds. Chat activity and stream audio
+ * both vary hugely between channels, so "6 messages" is a hype moment for one
+ * streamer and dead chat for another. A spike must now stand out from the last
+ * few minutes of that specific stream.
+ */
 function scoreMoment(runtime: Runtime, point: HeatPoint): void {
-  const recent = runtime.heat.filter((p) => p.t >= point.t - BASELINE_WINDOW * (TICK_MS / 1000)).map((p) => p.heat ?? 0);
-  const baseline = recent.length ? recent.reduce((a, b) => a + b, 0) / recent.length : 0;
-  const variance = recent.length ? recent.reduce((sum, value) => sum + (value - baseline) ** 2, 0) / recent.length : 0;
-  const deviation = Math.sqrt(variance);
-  const lift = (point.heat ?? 0) - baseline;
-  const chatSpike = (point.chat ?? 0) >= 6;
-  const audioSpike = (point.audio ?? 0) >= 0.62 && lift > 0.04;
+  const windowSeconds = BASELINE_WINDOW * (TICK_MS / 1000);
+  const recent = runtime.heat.filter((item) => item.t >= point.t - windowSeconds && item.t < point.t - 1);
+  // Warm up before trusting the baseline; otherwise the first chat message
+  // after going live looks like a once-in-a-stream surge.
+  if (recent.length < 10) return;
+
+  const audioStats = stats(recent.map((item) => item.audio ?? 0));
+  const chatStats = stats(recent.map((item) => item.chat ?? 0));
+  const audio = point.audio ?? 0;
+  const chat = point.chat ?? 0;
+  const audioZ = audioStats.sd > 0.012 ? (audio - audioStats.mean) / audioStats.sd : audio >= 0.55 ? 1.2 : 0;
+  const chatZ = chatStats.sd > 0.08 ? (chat - chatStats.mean) / chatStats.sd : chat >= Math.max(4, chatStats.mean * 2.2) ? 1.6 : 0;
+  const audioSpike = audioZ >= 1.25 && audio >= 0.4;
+  const chatSpike = chatZ >= 1.7 && chat >= 4;
   if (!audioSpike && !chatSpike) return;
-  if (lift < 0.06 && !chatSpike) return;
-  if (deviation > 0 && lift < deviation * 1.15 && !chatSpike) return;
+
+  const combined =
+    Math.max(audioZ * 0.62, chatZ * 0.55) +
+    Math.max(0, audioZ) * 0.18 +
+    Math.max(0, chatZ) * 0.12;
+  const score = Math.round(clamp01(0.42 + combined * 0.34) * 100);
+  if (score < 30) return;
 
   // Chat reacts after the moment. Rewind a configurable amount, then snap to
   // the strongest nearby audio beat so the clip lands on the actual payoff.
@@ -227,16 +258,19 @@ function scoreMoment(runtime: Runtime, point: HeatPoint): void {
   }
 
   const reason =
-    [audioSpike ? 'audio spike' : null,
+    [
+      audioSpike ? `audio spike (${audioZ.toFixed(1)}σ)` : null,
       chatSpike
-        ? `chat surge (${point.chat} msgs · rewound ${Math.round(Math.max(0, point.t - anchor))}s)`
+        ? `chat surge (${chat} msgs · ${chatZ.toFixed(1)}σ · rewound ${Math.round(Math.max(0, point.t - anchor))}s)`
         : null,
     ]
       .filter(Boolean)
       .join(' + ') || 'combined heat peak';
-  const score = Math.round(clamp01(0.5 + lift * 1.8 + Math.min(0.3, (point.chat ?? 0) / 28)) * 100);
+
+  // 45s dedupe window: chat and audio can both fire for the same beat, and a
+  // single hype moment should not create five near-identical projects.
   const last = runtime.session.moments[runtime.session.moments.length - 1];
-  if (last && Math.abs(anchor - last.t) < 22) {
+  if (last && Math.abs(anchor - last.t) < 45) {
     if (score > last.score) {
       last.t = Math.round(anchor * 10) / 10;
       last.score = score;
@@ -302,7 +336,14 @@ async function maybeAutoClip(runtime: Runtime, moment: LiveMoment): Promise<void
       sourceUrl: runtime.session.url,
       duration: endTime - startTime,
       chatHeat,
-      settings: { aiMode: 'off' },
+      settings: {
+        // Auto clips are small windows, so keeping Gemini in "smart" mode is
+        // cheap and gives the editor a human-quality pick. Users who turn AI
+        // off globally still get a fully local pipeline.
+        aiMode: settings.defaultAiMode === 'off' ? 'off' : 'smart',
+        reframe: 'split',
+        clipCount: Math.max(1, Math.min(3, settings.defaultClipCount)),
+      },
     });
     runtime.lastAutoProjectId = project.id;
     moment.projectId = project.id;
