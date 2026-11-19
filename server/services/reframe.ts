@@ -802,6 +802,35 @@ function selectWebcamFaces(
   return best.filter((target) => target.fw! <= limit);
 }
 
+/**
+ * A tight, static crop around the face itself. The full webcam overlay is used
+ * for masking and game exclusion, but the top panel should not show the dark
+ * area below the webcam.
+ */
+function camRectForFaces(
+  faces: FrameTarget[],
+  sourceWidth: number,
+  sourceHeight: number,
+  targetAspect: number,
+): CropGeometry | undefined {
+  if (faces.length < 3) return undefined;
+  const cx = median(faces.map((target) => target.cx)) ?? sourceWidth / 2;
+  const cy = median(faces.map((target) => target.cy)) ?? sourceHeight / 2;
+  const fw = median(faces.map((target) => target.fw! * sourceWidth)) ?? sourceWidth * 0.1;
+  const fh = median(faces.map((target) => target.fh! * sourceHeight)) ?? sourceHeight * 0.14;
+  let cropW = clamp(fw * 2.6, 140, sourceWidth * 0.5);
+  let cropH = cropW / targetAspect;
+  if (cropH < fh * 1.9) {
+    cropH = fh * 1.9;
+    cropW = cropH * targetAspect;
+  }
+  cropW = Math.max(2, Math.min(sourceWidth, Math.round(cropW / 2) * 2));
+  cropH = Math.max(2, Math.min(sourceHeight, Math.round(cropH / 2) * 2));
+  const x = Math.round(Math.max(0, Math.min(sourceWidth - cropW, cx - cropW / 2)) / 2) * 2;
+  const y = Math.round(Math.max(0, Math.min(sourceHeight - cropH, cy - cropH / 2 + fh * 0.15)) / 2) * 2;
+  return { cropW, cropH, maxX: sourceWidth - cropW, maxY: sourceHeight - cropH, centerX: x, centerY: y };
+}
+
 function inferPipRect(targets: FrameTarget[], sourceWidth: number, sourceHeight: number): PipRect | undefined {
   const faces = selectWebcamFaces(targets, sourceWidth, sourceHeight);
   if (faces.length < 3) return undefined;
@@ -855,7 +884,13 @@ function splitPlan(
   if (camOnTop && pipRect) {
     // The overlay is static in the source. Lock the panel to it instead of
     // tracking faces that move inside the PiP (or in-game cutscenes).
-    camGeometry = staticCamGeometry(pipRect, opts.sourceWidth, opts.sourceHeight, opts.outputWidth / camH);
+    camGeometry =
+      camRectForFaces(
+        selectWebcamFaces(targets, opts.sourceWidth, opts.sourceHeight),
+        opts.sourceWidth,
+        opts.sourceHeight,
+        opts.outputWidth / camH,
+      ) ?? staticCamGeometry(pipRect, opts.sourceWidth, opts.sourceHeight, opts.outputWidth / camH);
     const x = camGeometry.centerX;
     const y = camGeometry.centerY;
     const sample = () => ({
@@ -998,10 +1033,19 @@ export function splitExpressionForSamples(
     camOnTop && pipRect
       ? gameGeometryForPip(pipRect, sourceWidth, sourceHeight, outputWidth / gameH)
       : geometryForRatio(sourceWidth, sourceHeight, outputWidth / gameH);
+  const storedCam = camOnTop ? faceSamples?.[0] : undefined;
   const camGeometry =
-    camOnTop && pipRect
-      ? staticCamGeometry(pipRect, sourceWidth, sourceHeight, outputWidth / camH)
-      : camGeometryForFaceWidths(
+    camOnTop && pipRect && storedCam?.w
+      ? (() => {
+          const cropW = Math.max(2, Math.round(storedCam.w * sourceWidth / 2) * 2);
+          const cropH = Math.max(2, Math.round((storedCam.h ?? storedCam.w) * sourceHeight / 2) * 2);
+          const x = Math.round(Math.max(0, Math.min(sourceWidth - cropW, storedCam.x * sourceWidth - cropW / 2)) / 2) * 2;
+          const y = Math.round(Math.max(0, Math.min(sourceHeight - cropH, (storedCam.y ?? 0.5) * sourceHeight - cropH / 2)) / 2) * 2;
+          return { cropW, cropH, maxX: sourceWidth - cropW, maxY: sourceHeight - cropH, centerX: x, centerY: y };
+        })()
+      : camOnTop && pipRect
+        ? staticCamGeometry(pipRect, sourceWidth, sourceHeight, outputWidth / camH)
+        : camGeometryForFaceWidths(
           sourceWidth,
           sourceHeight,
           (faceSamples || []).map((sample) => (sample.fw ? sample.fw * sourceWidth : 0)),
