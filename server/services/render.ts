@@ -18,7 +18,7 @@ import { log } from '../lib/logger';
 import { parseFfmpegProgress, runProcess } from '../lib/process';
 import { writeCaptionFiles } from './captions';
 import { renderHookPng } from './hook';
-import { planReframe, cropExpressionForSamples, splitExpressionForSamples, safeInsets } from './reframe';
+import { planReframe, cropExpressionForSamples, splitExpressionForSamples, safeInsets, panelHeights, SPLIT_CAM_TOP_RATIO } from './reframe';
 
 const QUALITY: Record<QualityMode, { preset: string; crf: number }> = {
   fast: { preset: 'veryfast', crf: 23 },
@@ -333,6 +333,10 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
     out: hookAbs,
     watermark: options.watermark,
     brandHandle: options.brandHandle,
+    // Keep the hook off the facecam panel; place it just below the seam.
+    top: effectiveFraming === 'split-cam-top'
+      ? panelHeights(output.height, SPLIT_CAM_TOP_RATIO).topHeight + 16
+      : undefined,
   });
 
   options.onProgress?.(40, 'Rendering clip');

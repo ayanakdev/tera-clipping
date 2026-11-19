@@ -377,16 +377,18 @@ function noticeLayout(targets: FrameTarget[], sourceWidth: number, sourceHeight:
       reason: 'No stable face was found, so the clip keeps the centre of the frame.',
     };
   }
-  const coverage = faceTargets.length / Math.max(1, targets.length);
-  const widths = faceTargets
-    .map((target) => target.fw)
-    .filter((width): width is number => width !== null && Number.isFinite(width));
+  // In-game characters can be misdetected as faces. Only small, stable corner
+  // detections count as a webcam overlay; large cutscene faces are gameplay.
+  const pipTargets = selectWebcamFaces(faceTargets, sourceWidth, sourceHeight);
+  const widths = pipTargets.length
+    ? pipTargets.map((target) => target.fw!)
+    : faceTargets.map((target) => target.fw).filter((width): width is number => width !== null && Number.isFinite(width));
   const medianWidth = median(widths) ?? 0;
-  const outer = faceTargets.filter((target) => {
+  const outer = (pipTargets.length ? pipTargets : faceTargets).filter((target) => {
     const cx = target.cx! / sourceWidth;
     return cx < 0.33 || cx > 0.67;
   }).length;
-  const outerRatio = outer / faceTargets.length;
+  const outerRatio = outer / Math.max(1, pipTargets.length ? pipTargets.length : faceTargets.length);
   const motions = targets
     .map((target) => target.motion)
     .filter((motion): motion is number => motion !== null && Number.isFinite(motion));
@@ -394,7 +396,9 @@ function noticeLayout(targets: FrameTarget[], sourceWidth: number, sourceHeight:
 
   // Dark scenes make YuNet miss many frames. A handful of consistent small,
   // corner detections is enough; full-frame streamers fail the width test.
-  const smallFace = (coverage >= 0.55 || faceTargets.length >= 8) && medianWidth <= 0.2;
+  const smallFace =
+    (pipTargets.length / Math.max(1, targets.length) >= 0.3 || pipTargets.length >= 6) &&
+    medianWidth <= 0.18;
   const cornerFace = outerRatio >= 0.6;
   // A small face pinned in the corner of a landscape source is a webcam over
   // gameplay, even when the game is dark or slow. Motion only feeds confidence;
@@ -709,14 +713,68 @@ function camGeometryForTargets(
 }
 
 /**
+ * Lock the facecam panel to the webcam overlay itself. The PiP is fixed in the
+ * source, so tracking the face inside it only makes the panel drift.
+ */
+function staticCamGeometry(
+  pipRect: PipRect,
+  sourceWidth: number,
+  sourceHeight: number,
+  targetAspect: number,
+): CropGeometry {
+  let cropW = pipRect.w;
+  let cropH = pipRect.h;
+  if (cropW / cropH < targetAspect) cropW = cropH * targetAspect;
+  else cropH = cropW / targetAspect;
+  cropW = Math.max(2, Math.min(sourceWidth, Math.round(cropW / 2) * 2));
+  cropH = Math.max(2, Math.min(sourceHeight, Math.round(cropH / 2) * 2));
+  const cx = pipRect.x + pipRect.w / 2;
+  const cy = pipRect.y + pipRect.h / 2;
+  const centerX = Math.round(Math.max(0, Math.min(sourceWidth - cropW, cx - cropW / 2)) / 2) * 2;
+  const centerY = Math.round(Math.max(0, Math.min(sourceHeight - cropH, cy - cropH / 2)) / 2) * 2;
+  return {
+    cropW,
+    cropH,
+    maxX: sourceWidth - cropW,
+    maxY: sourceHeight - cropH,
+    centerX,
+    centerY,
+  };
+}
+
+/**
  * A corner webcam is usually baked into the gameplay footage. Estimate its
  * rectangle from the stable face boxes so the game panel can mask it and the
  * viewer never sees the same facecam twice.
  */
-function inferPipRect(targets: FrameTarget[], sourceWidth: number, sourceHeight: number): PipRect | undefined {
-  const faces = targets.filter(
-    (target) => target.cx !== null && target.cy !== null && target.fw && target.fh,
+function selectWebcamFaces(
+  targets: FrameTarget[],
+  sourceWidth: number,
+  sourceHeight: number,
+): FrameTarget[] {
+  const candidates = targets.filter(
+    (target) =>
+      target.cx !== null &&
+      target.cy !== null &&
+      target.fw !== null &&
+      target.fh !== null &&
+      (target.cx / sourceWidth < 0.33 || target.cx / sourceWidth > 0.67) &&
+      (target.cy / sourceHeight < 0.4 || target.cy / sourceHeight > 0.6),
   );
+  const groups = [
+    candidates.filter((target) => target.cx! / sourceWidth < 0.33),
+    candidates.filter((target) => target.cx! / sourceWidth > 0.67),
+  ].filter((group) => group.length >= 3);
+  if (!groups.length) return [];
+  const medianWidth = (group: FrameTarget[]): number => median(group.map((target) => target.fw!)) ?? 1;
+  groups.sort((a, b) => medianWidth(a) - medianWidth(b));
+  const best = groups[0]!;
+  const limit = medianWidth(best) * 1.6;
+  return best.filter((target) => target.fw! <= limit);
+}
+
+function inferPipRect(targets: FrameTarget[], sourceWidth: number, sourceHeight: number): PipRect | undefined {
+  const faces = selectWebcamFaces(targets, sourceWidth, sourceHeight);
   if (faces.length < 3) return undefined;
   const cx = median(faces.map((target) => target.cx)) ?? sourceWidth / 2;
   const cy = median(faces.map((target) => target.cy)) ?? sourceHeight / 2;
@@ -725,8 +783,8 @@ function inferPipRect(targets: FrameTarget[], sourceWidth: number, sourceHeight:
   // Webcam panels sit in a corner with headroom and shoulders around the face.
   // Anchor to that corner rather than estimating an offset from the face centre,
   // which left the top of the overlay visible.
-  const w = Math.round(clamp(fw * 3.4, 120, sourceWidth * 0.5) / 2) * 2;
-  const h = Math.round(clamp(fh * 3.4, 120, sourceHeight * 0.5) / 2) * 2;
+  const w = Math.round(clamp(fw * 4.2, 160, sourceWidth * 0.55) / 2) * 2;
+  const h = Math.round(clamp(fh * 4.5, 160, sourceHeight * 0.55) / 2) * 2;
   const x = cx < sourceWidth / 2 ? 2 : sourceWidth - w - 2;
   const y = cy < sourceHeight / 2 ? 2 : sourceHeight - h - 2;
   return { x, y, w, h };
@@ -752,7 +810,8 @@ function splitPlan(
   const gameH = camOnTop ? bottomHeight : topHeight;
   const camH = camOnTop ? topHeight : bottomHeight;
   const gameGeometry = geometryForRatio(opts.sourceWidth, opts.sourceHeight, opts.outputWidth / gameH);
-  const camGeometry = camGeometryForTargets(
+  const pipRect = camOnTop ? inferPipRect(targets, opts.sourceWidth, opts.sourceHeight) : undefined;
+  let camGeometry = camGeometryForTargets(
     opts.sourceWidth,
     opts.sourceHeight,
     targets,
@@ -760,10 +819,29 @@ function splitPlan(
     3.2,
     camOnTop ? 0.62 : 0.82,
   );
-  // A negative bias puts the face lower inside the top panel, clear of the
-  // hook card that sits in the top safe area.
-  const tracked = smoothTargets(targets, camGeometry, opts, camOnTop ? -0.3 : 0.14, camOnTop);
-  const pipRect = camOnTop ? inferPipRect(targets, opts.sourceWidth, opts.sourceHeight) : undefined;
+  let tracked: FaceAnalysis;
+  if (camOnTop && pipRect) {
+    // The overlay is static in the source. Lock the panel to it instead of
+    // tracking faces that move inside the PiP (or in-game cutscenes).
+    camGeometry = staticCamGeometry(pipRect, opts.sourceWidth, opts.sourceHeight, opts.outputWidth / camH);
+    const x = camGeometry.centerX;
+    const y = camGeometry.centerY;
+    const sample = () => ({
+      x: (x + camGeometry.cropW / 2) / opts.sourceWidth,
+      w: camGeometry.cropW / opts.sourceWidth,
+      y: (y + camGeometry.cropH / 2) / opts.sourceHeight,
+      h: camGeometry.cropH / opts.sourceHeight,
+      faces: 1,
+    });
+    tracked = {
+      times: [0, opts.duration],
+      xs: [x, x],
+      ys: [y, y],
+      faceSamples: [{ t: 0, ...sample() }, { t: Math.round(opts.duration * 100) / 100, ...sample() }],
+    };
+  } else {
+    tracked = smoothTargets(targets, camGeometry, opts, camOnTop ? -0.3 : 0.14, camOnTop);
+  }
   return {
     mode: camOnTop ? 'split-cam-top' : 'split',
     filter: splitFilter(gameGeometry, camGeometry, tracked.times, tracked.xs, tracked.ys, opts.outputWidth, opts.outputHeight, camOnTop, pipRect),
@@ -885,16 +963,19 @@ export function splitExpressionForSamples(
   const gameH = camOnTop ? bottomHeight : topHeight;
   const camH = camOnTop ? topHeight : bottomHeight;
   const gameGeometry = geometryForRatio(sourceWidth, sourceHeight, outputWidth / gameH);
-  const camGeometry = camGeometryForFaceWidths(
-    sourceWidth,
-    sourceHeight,
-    (faceSamples || []).map((sample) => (sample.fw ? sample.fw * sourceWidth : 0)),
-    outputWidth / camH,
-    3.2,
-    camOnTop ? 0.62 : 0.82,
-    2.2,
-    (faceSamples || []).map((sample) => (sample.fh ? sample.fh * sourceHeight : 0)),
-  );
+  const camGeometry =
+    camOnTop && pipRect
+      ? staticCamGeometry(pipRect, sourceWidth, sourceHeight, outputWidth / camH)
+      : camGeometryForFaceWidths(
+          sourceWidth,
+          sourceHeight,
+          (faceSamples || []).map((sample) => (sample.fw ? sample.fw * sourceWidth : 0)),
+          outputWidth / camH,
+          3.2,
+          camOnTop ? 0.62 : 0.82,
+          2.2,
+          (faceSamples || []).map((sample) => (sample.fh ? sample.fh * sourceHeight : 0)),
+        );
   const times: number[] = [];
   const xs: number[] = [];
   const ys: number[] = [];

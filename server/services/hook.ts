@@ -113,6 +113,8 @@ export interface HookRenderOptions {
   out: string;
   watermark?: boolean;
   brandHandle?: string;
+  /** Override the card's vertical position (used by stacked layouts). */
+  top?: number;
 }
 
 export async function renderHookPng(options: HookRenderOptions): Promise<boolean> {
@@ -156,7 +158,7 @@ export async function renderHookPng(options: HookRenderOptions): Promise<boolean
   const maxLineWidth = Math.max(...lines.map((line) => measureLine(line, size)), 200);
   const cardWidth = Math.min(maxCardWidth, maxLineWidth + padX * 2);
   const cardX = (frameW - cardWidth) / 2;
-  const top = options.aspect === '9:16' ? Math.round(frameH * 0.075) : options.aspect === '1:1' ? 74 : 54;
+  const top = options.top ?? (options.aspect === '9:16' ? Math.round(frameH * 0.075) : options.aspect === '1:1' ? 74 : 54);
 
   const canvas = createCanvas(frameW, frameH);
   const ctx = canvas.getContext('2d');
