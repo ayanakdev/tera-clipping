@@ -119,11 +119,11 @@ export function cuesFromWords(
     if (bucket.length) {
       const gap = word.start - bucket[bucket.length - 1]!.end;
       const span = word.end - bucket[0]!.start;
-      if (gap > 0.8 || span > 3.6 || bucket.length >= 6) flush();
+      if (gap > 0.8 || span > 2.2 || bucket.length >= 2) flush();
     }
     bucket.push({ start: word.start, end: word.end, text });
-    if (/[.!?]["')\]]?$/.test(text) && bucket.length >= 3) flush();
-    if (bucket.length >= 6) flush();
+    if (/[.!?]["')\]]?$/.test(text)) flush();
+    if (bucket.length >= 2) flush();
   }
   flush();
   return cues;

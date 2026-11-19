@@ -54,7 +54,7 @@ function seedCreatorProfiles(): CreatorProfile[] {
   }));
 }
 
-const INDEX_VERSION = 2;
+const INDEX_VERSION = 3;
 
 const EMPTY_INDEX = (): IndexFile => ({
   version: INDEX_VERSION,
@@ -118,6 +118,12 @@ class Store {
       if (previousVersion < 2 && this.index.settings.defaultReframe === 'smart') {
         this.index.settings.defaultReframe = 'auto';
         log.info('settings migrated: framing now notices the stream layout');
+      }
+      // v3 switches captions to small, card-free two-word lines.
+      if (previousVersion < 3 && this.index.settings.defaultCaptionPreset === 'tera-box' && this.index.settings.defaultCaptionScale === 1) {
+        this.index.settings.defaultCaptionPreset = 'word-flow';
+        this.index.settings.defaultCaptionScale = 0.75;
+        log.info('settings migrated: captions now use small two-word lines');
       }
       this.index.version = INDEX_VERSION;
     } catch (error: unknown) {

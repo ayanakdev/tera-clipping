@@ -26,6 +26,7 @@ const FONT_SIZE: Record<CaptionPresetId, number> = {
   beast: 112,
   clean: 54,
   neon: 60,
+  'word-flow': 62,
 };
 
 /**
@@ -187,7 +188,12 @@ function makeCues(words: Word[], options: CaptionOptions): Cue[] {
   const maxTextWidth = Math.min(frameW - 130, preset.box ? 840 : 1000);
   const maxLines = preset.id === 'beast' ? 1 : 2;
   const maxWords = preset.wordsPerCue;
-  const maxCueSeconds = preset.id === 'beast' ? 1.4 : preset.id === 'clean' ? 3.8 : 3.4;
+  const maxCueSeconds =
+    preset.id === 'beast' || preset.id === 'word-flow'
+      ? 1.8
+      : preset.id === 'clean'
+        ? 3.8
+        : 3.4;
   const lineHeight = fontSize * 1.16;
   const position =
     options.centerY ??

@@ -575,7 +575,7 @@ function centreFilter(geometry: CropGeometry, outputWidth: number, outputHeight:
 /** Legacy layout: game on top, facecam underneath. */
 export const SPLIT_GAME_TOP_RATIO = 0.62;
 /** New layout: tracked facecam above, full game frame below. */
-export const SPLIT_CAM_TOP_RATIO = 0.36;
+export const SPLIT_CAM_TOP_RATIO = 0.42;
 
 /** Even panel heights so vstack + yuv420p never see odd dimensions. */
 export function panelHeights(
@@ -646,12 +646,43 @@ function splitFilter(
       ].join(';')
     : `[game]${delogo}crop=${gameGeometry.cropW}:${gameGeometry.cropH}:${Math.round(gameGeometry.centerX)}:${Math.round(gameGeometry.centerY)},scale=${outputWidth}:${gameH}:flags=lanczos,setsar=1[gp]`;
   const dividerY = camOnTop ? 'ih-3' : '0';
+  const camScale = camOnTop
+    ? `scale=${outputWidth}:${camH}:force_original_aspect_ratio=increase,crop=${outputWidth}:${camH},setsar=1`
+    : `scale=${outputWidth}:${camH}:flags=lanczos,setsar=1`;
   return [
     'split=2[game][cam]',
     gamePanel,
-    `[cam]${camCrop},scale=${outputWidth}:${camH}:flags=lanczos,setsar=1,drawbox=x=0:y=${dividerY}:w=iw:h=3:color=black@0.55:t=fill[cp]`,
+    `[cam]${camCrop},${camScale},drawbox=x=0:y=${dividerY}:w=iw:h=3:color=black@0.55:t=fill[cp]`,
     camOnTop ? '[cp][gp]vstack=inputs=2,setsar=1' : '[gp][cp]vstack=inputs=2,setsar=1',
   ].join(';');
+}
+
+/**
+ * Zoom the game panel so the corner webcam overlay is outside the crop, while
+ * keeping the panel aspect exact.
+ */
+function gameGeometryForPip(
+  pipRect: PipRect,
+  sourceWidth: number,
+  sourceHeight: number,
+  targetAspect: number,
+): CropGeometry {
+  const margin = 8;
+  const leftSide = pipRect.x + pipRect.w / 2 < sourceWidth / 2;
+  let x = leftSide ? pipRect.x + pipRect.w + margin : 0;
+  let w = leftSide ? sourceWidth - x : pipRect.x - margin;
+  if (w < sourceWidth * 0.45) return geometryForRatio(sourceWidth, sourceHeight, targetAspect);
+  let h = w / targetAspect;
+  if (h > sourceHeight) {
+    h = sourceHeight;
+    w = h * targetAspect;
+    x = leftSide ? sourceWidth - w : 0;
+  }
+  w = Math.max(2, Math.min(sourceWidth, Math.round(w / 2) * 2));
+  h = Math.max(2, Math.min(sourceHeight, Math.round(h / 2) * 2));
+  x = Math.round(Math.max(0, Math.min(sourceWidth - w, x)) / 2) * 2;
+  const y = Math.round(Math.max(0, (sourceHeight - h) / 2) / 2) * 2;
+  return { cropW: w, cropH: h, maxX: sourceWidth - w, maxY: sourceHeight - h, centerX: x, centerY: y };
 }
 
 function camGeometryForFaceWidths(
@@ -722,12 +753,10 @@ function staticCamGeometry(
   sourceHeight: number,
   targetAspect: number,
 ): CropGeometry {
-  let cropW = pipRect.w;
-  let cropH = pipRect.h;
-  if (cropW / cropH < targetAspect) cropW = cropH * targetAspect;
-  else cropH = cropW / targetAspect;
-  cropW = Math.max(2, Math.min(sourceWidth, Math.round(cropW / 2) * 2));
-  cropH = Math.max(2, Math.min(sourceHeight, Math.round(cropH / 2) * 2));
+  // Use the PiP rectangle as-is (with a small border) so the face fills the
+  // panel instead of being lost in a large crop of the surrounding room.
+  const cropW = Math.max(2, Math.min(sourceWidth, Math.round((pipRect.w + 8) / 2) * 2));
+  const cropH = Math.max(2, Math.min(sourceHeight, Math.round((pipRect.h + 8) / 2) * 2));
   const cx = pipRect.x + pipRect.w / 2;
   const cy = pipRect.y + pipRect.h / 2;
   const centerX = Math.round(Math.max(0, Math.min(sourceWidth - cropW, cx - cropW / 2)) / 2) * 2;
@@ -809,8 +838,11 @@ function splitPlan(
   const { topHeight, bottomHeight } = panelHeights(opts.outputHeight, topRatio);
   const gameH = camOnTop ? bottomHeight : topHeight;
   const camH = camOnTop ? topHeight : bottomHeight;
-  const gameGeometry = geometryForRatio(opts.sourceWidth, opts.sourceHeight, opts.outputWidth / gameH);
   const pipRect = camOnTop ? inferPipRect(targets, opts.sourceWidth, opts.sourceHeight) : undefined;
+  const gameGeometry =
+    camOnTop && pipRect
+      ? gameGeometryForPip(pipRect, opts.sourceWidth, opts.sourceHeight, opts.outputWidth / gameH)
+      : geometryForRatio(opts.sourceWidth, opts.sourceHeight, opts.outputWidth / gameH);
   let camGeometry = camGeometryForTargets(
     opts.sourceWidth,
     opts.sourceHeight,
@@ -962,7 +994,10 @@ export function splitExpressionForSamples(
   const { topHeight, bottomHeight } = panelHeights(outputHeight, topRatio);
   const gameH = camOnTop ? bottomHeight : topHeight;
   const camH = camOnTop ? topHeight : bottomHeight;
-  const gameGeometry = geometryForRatio(sourceWidth, sourceHeight, outputWidth / gameH);
+  const gameGeometry =
+    camOnTop && pipRect
+      ? gameGeometryForPip(pipRect, sourceWidth, sourceHeight, outputWidth / gameH)
+      : geometryForRatio(sourceWidth, sourceHeight, outputWidth / gameH);
   const camGeometry =
     camOnTop && pipRect
       ? staticCamGeometry(pipRect, sourceWidth, sourceHeight, outputWidth / camH)

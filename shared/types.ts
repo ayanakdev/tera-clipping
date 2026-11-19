@@ -14,7 +14,7 @@ export type SourceKind = 'vod' | 'clip' | 'live' | 'upload' | 'file' | 'url';
 
 export type AspectRatio = '9:16' | '1:1' | '16:9';
 
-export type CaptionPresetId = 'tera-box' | 'hormozi' | 'purple-pop' | 'beast' | 'clean' | 'neon';
+export type CaptionPresetId = 'tera-box' | 'hormozi' | 'purple-pop' | 'beast' | 'clean' | 'neon' | 'word-flow';
 
 export type HookStyleId = 'white' | 'black' | 'purple' | 'none';
 
