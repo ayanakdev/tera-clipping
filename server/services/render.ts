@@ -18,7 +18,7 @@ import { log } from '../lib/logger';
 import { parseFfmpegProgress, runProcess } from '../lib/process';
 import { writeCaptionFiles } from './captions';
 import { renderHookPng } from './hook';
-import { planReframe, cropExpressionForSamples, splitExpressionForSamples, safeInsets, panelHeights, SPLIT_CAM_TOP_RATIO } from './reframe';
+import { planReframe, cropExpressionForSamples, splitExpressionForSamples, safeInsets, panelHeights, SPLIT_CAM_TOP_RATIO, SPLIT_GAME_TOP_RATIO } from './reframe';
 
 const QUALITY: Record<QualityMode, { preset: string; crf: number }> = {
   fast: { preset: 'veryfast', crf: 23 },
@@ -310,10 +310,13 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
     pipRect = plan.pipRect;
   }
 
+  // The concrete layout is only known after planning. Reuse an already noticed
+  // decision, otherwise trust the plan we just made.
+  const layoutMode = notice?.mode ?? effectiveFraming;
   options.onProgress?.(32, 'Writing captions');
   const insets = safeInsets(output.width, output.height);
   const captionY =
-    effectiveFraming === 'split-cam-top'
+    layoutMode === 'split-cam-top'
       ? Math.min(Math.round(output.height * 0.72), output.height - insets.bottom - 120)
       : undefined;
   await writeCaptionFiles(relativeWords, assAbs, srtAbs, {
@@ -326,6 +329,14 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
   });
 
   options.onProgress?.(36, 'Building hook');
+  // Put the hook card on the seam between the facecam and gameplay panels so
+  // it never sits on the streamer's face or buries the game action.
+  const seamRatio =
+    layoutMode === 'split-cam-top'
+      ? SPLIT_CAM_TOP_RATIO
+      : layoutMode === 'split'
+        ? SPLIT_GAME_TOP_RATIO
+        : undefined;
   const hasHook = await renderHookPng({
     text: clip.hook,
     style: clip.hookStyle,
@@ -333,10 +344,7 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
     out: hookAbs,
     watermark: options.watermark,
     brandHandle: options.brandHandle,
-    // Keep the hook off the facecam panel; place it just below the seam.
-    top: effectiveFraming === 'split-cam-top'
-      ? panelHeights(output.height, SPLIT_CAM_TOP_RATIO).topHeight + 16
-      : undefined,
+    centerAt: seamRatio != null ? panelHeights(output.height, seamRatio).topHeight : undefined,
   });
 
   options.onProgress?.(40, 'Rendering clip');

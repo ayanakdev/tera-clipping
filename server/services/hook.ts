@@ -113,7 +113,9 @@ export interface HookRenderOptions {
   out: string;
   watermark?: boolean;
   brandHandle?: string;
-  /** Override the card's vertical position (used by stacked layouts). */
+  /** Place the card centre at this y (used to straddle a panel seam). */
+  centerAt?: number;
+  /** Override the card's vertical position. */
   top?: number;
 }
 
@@ -158,7 +160,9 @@ export async function renderHookPng(options: HookRenderOptions): Promise<boolean
   const maxLineWidth = Math.max(...lines.map((line) => measureLine(line, size)), 200);
   const cardWidth = Math.min(maxCardWidth, maxLineWidth + padX * 2);
   const cardX = (frameW - cardWidth) / 2;
-  const top = options.top ?? (options.aspect === '9:16' ? Math.round(frameH * 0.075) : options.aspect === '1:1' ? 74 : 54);
+  const top = options.centerAt != null
+    ? Math.round(options.centerAt - cardHeight / 2)
+    : options.top ?? (options.aspect === '9:16' ? Math.round(frameH * 0.075) : options.aspect === '1:1' ? 74 : 54);
 
   const canvas = createCanvas(frameW, frameH);
   const ctx = canvas.getContext('2d');
