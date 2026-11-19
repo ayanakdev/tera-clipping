@@ -575,7 +575,7 @@ function centreFilter(geometry: CropGeometry, outputWidth: number, outputHeight:
 /** Legacy layout: game on top, facecam underneath. */
 export const SPLIT_GAME_TOP_RATIO = 0.62;
 /** New layout: tracked facecam above, full game frame below. */
-export const SPLIT_CAM_TOP_RATIO = 0.42;
+export const SPLIT_CAM_TOP_RATIO = 0.35;
 
 /** Even panel heights so vstack + yuv420p never see odd dimensions. */
 export function panelHeights(
@@ -638,12 +638,7 @@ function splitFilter(
   );
   const camCrop = `crop=${camGeometry.cropW}:${camGeometry.cropH}:'${xExpr}':'${yExpr}'`;
   const gamePanel = camOnTop
-    ? [
-        `[game]${delogo}split=2[gbg][gfg]`,
-        `[gbg]scale=${outputWidth}:${gameH}:force_original_aspect_ratio=increase,crop=${outputWidth}:${gameH},gblur=sigma=20,eq=brightness=-0.14[gb]`,
-        `[gfg]scale=${outputWidth}:${gameH}:force_original_aspect_ratio=decrease[gs]`,
-        '[gb][gs]overlay=(W-w)/2:(H-h)/2,setsar=1[gp]',
-      ].join(';')
+    ? `[game]${delogo}crop=${gameGeometry.cropW}:${gameGeometry.cropH}:${Math.round(gameGeometry.centerX)}:${Math.round(gameGeometry.centerY)},scale=${outputWidth}:${gameH}:flags=lanczos,setsar=1[gp]`
     : `[game]${delogo}crop=${gameGeometry.cropW}:${gameGeometry.cropH}:${Math.round(gameGeometry.centerX)}:${Math.round(gameGeometry.centerY)},scale=${outputWidth}:${gameH}:flags=lanczos,setsar=1[gp]`;
   const dividerY = camOnTop ? 'ih-3' : '0';
   const camScale = camOnTop
@@ -816,18 +811,20 @@ function camRectForFaces(
   if (faces.length < 3) return undefined;
   const cx = median(faces.map((target) => target.cx)) ?? sourceWidth / 2;
   const cy = median(faces.map((target) => target.cy)) ?? sourceHeight / 2;
-  const fw = median(faces.map((target) => target.fw! * sourceWidth)) ?? sourceWidth * 0.1;
   const fh = median(faces.map((target) => target.fh! * sourceHeight)) ?? sourceHeight * 0.14;
-  let cropW = clamp(fw * 2.6, 140, sourceWidth * 0.5);
-  let cropH = cropW / targetAspect;
-  if (cropH < fh * 1.9) {
-    cropH = fh * 1.9;
-    cropW = cropH * targetAspect;
+  // Head + top of shoulders, with eyes near the upper third of the panel.
+  // ~2x the detected face-box height keeps the face readable without filling
+  // the whole panel.
+  let cropH = clamp(fh * 2.05, 110, sourceHeight * 0.45);
+  let cropW = cropH * targetAspect;
+  if (cropW > sourceWidth * 0.5) {
+    cropW = sourceWidth * 0.5;
+    cropH = cropW / targetAspect;
   }
-  cropW = Math.max(2, Math.min(sourceWidth, Math.round(cropW / 2) * 2));
-  cropH = Math.max(2, Math.min(sourceHeight, Math.round(cropH / 2) * 2));
+  cropW = Math.max(2, Math.round(cropW / 2) * 2);
+  cropH = Math.max(2, Math.round(cropH / 2) * 2);
   const x = Math.round(Math.max(0, Math.min(sourceWidth - cropW, cx - cropW / 2)) / 2) * 2;
-  const y = Math.round(Math.max(0, Math.min(sourceHeight - cropH, cy - cropH / 2 + fh * 0.15)) / 2) * 2;
+  const y = Math.round(Math.max(0, Math.min(sourceHeight - cropH, cy - cropH / 2 + fh * 0.24)) / 2) * 2;
   return { cropW, cropH, maxX: sourceWidth - cropW, maxY: sourceHeight - cropH, centerX: x, centerY: y };
 }
 
