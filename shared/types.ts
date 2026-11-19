@@ -33,6 +33,8 @@ export interface PipRect {
   y: number;
   w: number;
   h: number;
+  /** Source pixels skipped at the top of the game crop when it is dark. */
+  shiftY?: number;
 }
 
 /** What `auto` framing noticed about the source, kept for the UI and re-renders. */

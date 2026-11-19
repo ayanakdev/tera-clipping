@@ -575,7 +575,7 @@ function centreFilter(geometry: CropGeometry, outputWidth: number, outputHeight:
 /** Legacy layout: game on top, facecam underneath. */
 export const SPLIT_GAME_TOP_RATIO = 0.62;
 /** New layout: tracked facecam above, full game frame below. */
-export const SPLIT_CAM_TOP_RATIO = 0.35;
+export const SPLIT_CAM_TOP_RATIO = 0.3;
 
 /** Even panel heights so vstack + yuv420p never see odd dimensions. */
 export function panelHeights(
@@ -667,16 +667,17 @@ function gameGeometryForPip(
   let x = leftSide ? pipRect.x + pipRect.w + margin : 0;
   let w = leftSide ? sourceWidth - x : pipRect.x - margin;
   if (w < sourceWidth * 0.45) return geometryForRatio(sourceWidth, sourceHeight, targetAspect);
+  const top = clamp(pipRect.shiftY ?? 0, 0, sourceHeight * 0.18);
   let h = w / targetAspect;
-  if (h > sourceHeight) {
-    h = sourceHeight;
+  if (h > sourceHeight - top) {
+    h = sourceHeight - top;
     w = h * targetAspect;
     x = leftSide ? sourceWidth - w : 0;
   }
   w = Math.max(2, Math.min(sourceWidth, Math.round(w / 2) * 2));
-  h = Math.max(2, Math.min(sourceHeight, Math.round(h / 2) * 2));
+  h = Math.max(2, Math.min(sourceHeight - top, Math.round(h / 2) * 2));
   x = Math.round(Math.max(0, Math.min(sourceWidth - w, x)) / 2) * 2;
-  const y = Math.round(Math.max(0, (sourceHeight - h) / 2) / 2) * 2;
+  const y = Math.round((top + Math.max(0, sourceHeight - top - h) / 2) / 2) * 2;
   return { cropW: w, cropH: h, maxX: sourceWidth - w, maxY: sourceHeight - h, centerX: x, centerY: y };
 }
 
@@ -865,6 +866,11 @@ function splitPlan(
   const gameH = camOnTop ? bottomHeight : topHeight;
   const camH = camOnTop ? topHeight : bottomHeight;
   const pipRect = camOnTop ? inferPipRect(targets, opts.sourceWidth, opts.sourceHeight) : undefined;
+  if (camOnTop && pipRect) {
+    // Skip a small strip of dark ceiling/sky at the top of the game. Keep it
+    // modest so the top HUD mostly survives.
+    pipRect.shiftY = Math.round((opts.sourceHeight * 0.08) / 2) * 2;
+  }
   const gameGeometry =
     camOnTop && pipRect
       ? gameGeometryForPip(pipRect, opts.sourceWidth, opts.sourceHeight, opts.outputWidth / gameH)
