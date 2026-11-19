@@ -449,6 +449,7 @@ async function runPipeline(projectId: string, signal: AbortSignal): Promise<void
       clip.files = result.files;
       clip.faceSamples = result.faceSamples;
       clip.notice = result.notice;
+      clip.pipRect = result.pipRect;
       clip.status = 'ready';
       clip.stage = 'ready';
       clip.progress = 100;
@@ -628,6 +629,7 @@ export async function editClip(
     clip.duration = Math.round((clip.end - clip.start) * 100) / 100;
     clip.faceSamples = undefined;
     clip.notice = undefined;
+    clip.pipRect = undefined;
   }
   if (patch.title !== undefined) clip.title = patch.title.slice(0, 120);
   if (patch.hook !== undefined) clip.hook = patch.hook.slice(0, 120);
@@ -649,6 +651,7 @@ export async function editClip(
     clip.framing = patch.framing;
     clip.faceSamples = undefined;
     clip.notice = undefined;
+    clip.pipRect = undefined;
   }
   if (patch.starred !== undefined) clip.starred = patch.starred;
 
@@ -713,6 +716,7 @@ export async function editClip(
     clip.files = result.files;
     clip.faceSamples = result.faceSamples;
     if (result.notice) clip.notice = result.notice;
+    clip.pipRect = result.pipRect;
     clip.status = 'ready';
     clip.stage = 'ready';
     clip.progress = 100;

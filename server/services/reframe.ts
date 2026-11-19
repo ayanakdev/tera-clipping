@@ -1,4 +1,4 @@
-import type { AspectRatio, FaceSample, LayoutNotice, ReframeMode } from '../../shared/types';
+import type { AspectRatio, FaceSample, LayoutNotice, PipRect, ReframeMode } from '../../shared/types';
 import { ASPECT_SIZES } from '../../shared/presets';
 import { PATHS } from '../config';
 import { decodeRgbFrames, type RgbFrame } from './media';
@@ -161,6 +161,8 @@ export interface ReframePlan {
   faceSamples: FaceSample[];
   /** Only set for `auto` framing. */
   notice?: LayoutNotice;
+  /** Webcam overlay in the source, masked out of the game panel. */
+  pipRect?: PipRect;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -420,6 +422,7 @@ function smoothTargets(
   geometry: CropGeometry,
   opts: ReframeOptions,
   yBias = 0.06,
+  snappy = false,
 ): FaceAnalysis {
   if (!targets.length) {
     const faceSamples: FaceSample[] = [
@@ -475,8 +478,10 @@ function smoothTargets(
         const predicted = smoothX + velocityX * dt;
         const residual = targetX - predicted;
         if (Math.abs(residual) > geometry.cropW * 0.01) {
-          const alpha = Math.abs(residual) > geometry.cropW * 0.5 ? 0.65 : 0.38;
-          const beta = 0.12;
+          const alpha = Math.abs(residual) > geometry.cropW * 0.5
+            ? (snappy ? 0.85 : 0.65)
+            : (snappy ? 0.62 : 0.38);
+          const beta = snappy ? 0.22 : 0.12;
           const next = predicted + residual * alpha;
           const step = clamp(next - smoothX, -maxStep, maxStep);
           smoothX += step;
@@ -492,16 +497,20 @@ function smoothTargets(
           const predicted = smoothY + velocityY * dt;
           const residual = desiredY - predicted;
           if (Math.abs(residual) > geometry.cropH * 0.012) {
-            const alpha = Math.abs(residual) > geometry.cropH * 0.45 ? 0.6 : 0.32;
+            const alpha = Math.abs(residual) > geometry.cropH * 0.45
+              ? (snappy ? 0.8 : 0.6)
+              : (snappy ? 0.58 : 0.32);
             const next = predicted + residual * alpha;
             const step = clamp(next - smoothY, -maxStep, maxStep);
             smoothY += step;
-            velocityY = clamp(velocityY + (0.08 * residual) / dt, -opts.sourceHeight, opts.sourceHeight);
+            velocityY = clamp(velocityY + ((snappy ? 0.18 : 0.08) * residual) / dt, -opts.sourceHeight, opts.sourceHeight);
           }
         }
       }
-    } else if (t - lastFaceAt > 1.5) {
+    } else if (!snappy && t - lastFaceAt > 1.5) {
       // No face for a while: drift calmly back to the middle of the frame.
+      // The cam-top layout holds position instead, so the panel does not
+      // slowly slide away from the speaker when detection drops a frame.
       velocityX *= 0.8;
       velocityY *= 0.8;
       smoothX += clamp((opts.sourceWidth / 2 - smoothX) * 0.03, -maxStep * 0.25, maxStep * 0.25);
@@ -604,7 +613,11 @@ function splitFilter(
   outputWidth: number,
   outputHeight: number,
   camOnTop = false,
+  pipRect?: PipRect,
 ): string {
+  const delogo = pipRect
+    ? `delogo=x=${pipRect.x}:y=${pipRect.y}:w=${pipRect.w}:h=${pipRect.h}:show=0,`
+    : '';
   const topRatio = camOnTop ? SPLIT_CAM_TOP_RATIO : SPLIT_GAME_TOP_RATIO;
   const { topHeight, bottomHeight } = panelHeights(outputHeight, topRatio);
   const gameH = camOnTop ? bottomHeight : topHeight;
@@ -622,12 +635,12 @@ function splitFilter(
   const camCrop = `crop=${camGeometry.cropW}:${camGeometry.cropH}:'${xExpr}':'${yExpr}'`;
   const gamePanel = camOnTop
     ? [
-        '[game]split=2[gbg][gfg]',
+        `[game]${delogo}split=2[gbg][gfg]`,
         `[gbg]scale=${outputWidth}:${gameH}:force_original_aspect_ratio=increase,crop=${outputWidth}:${gameH},gblur=sigma=20,eq=brightness=-0.14[gb]`,
         `[gfg]scale=${outputWidth}:${gameH}:force_original_aspect_ratio=decrease[gs]`,
         '[gb][gs]overlay=(W-w)/2:(H-h)/2,setsar=1[gp]',
       ].join(';')
-    : `[game]crop=${gameGeometry.cropW}:${gameGeometry.cropH}:${Math.round(gameGeometry.centerX)}:${Math.round(gameGeometry.centerY)},scale=${outputWidth}:${gameH}:flags=lanczos,setsar=1[gp]`;
+    : `[game]${delogo}crop=${gameGeometry.cropW}:${gameGeometry.cropH}:${Math.round(gameGeometry.centerX)}:${Math.round(gameGeometry.centerY)},scale=${outputWidth}:${gameH}:flags=lanczos,setsar=1[gp]`;
   const dividerY = camOnTop ? 'ih-3' : '0';
   return [
     'split=2[game][cam]',
@@ -695,6 +708,30 @@ function camGeometryForTargets(
   );
 }
 
+/**
+ * A corner webcam is usually baked into the gameplay footage. Estimate its
+ * rectangle from the stable face boxes so the game panel can mask it and the
+ * viewer never sees the same facecam twice.
+ */
+function inferPipRect(targets: FrameTarget[], sourceWidth: number, sourceHeight: number): PipRect | undefined {
+  const faces = targets.filter(
+    (target) => target.cx !== null && target.cy !== null && target.fw && target.fh,
+  );
+  if (faces.length < 3) return undefined;
+  const cx = median(faces.map((target) => target.cx)) ?? sourceWidth / 2;
+  const cy = median(faces.map((target) => target.cy)) ?? sourceHeight / 2;
+  const fw = median(faces.map((target) => target.fw! * sourceWidth)) ?? sourceWidth * 0.12;
+  const fh = median(faces.map((target) => target.fh! * sourceHeight)) ?? sourceHeight * 0.16;
+  // Webcam panels sit in a corner with headroom and shoulders around the face.
+  // Anchor to that corner rather than estimating an offset from the face centre,
+  // which left the top of the overlay visible.
+  const w = Math.round(clamp(fw * 3.4, 120, sourceWidth * 0.5) / 2) * 2;
+  const h = Math.round(clamp(fh * 3.4, 120, sourceHeight * 0.5) / 2) * 2;
+  const x = cx < sourceWidth / 2 ? 2 : sourceWidth - w - 2;
+  const y = cy < sourceHeight / 2 ? 2 : sourceHeight - h - 2;
+  return { x, y, w, h };
+}
+
 function blurFilter(outputWidth: number, outputHeight: number): string {
   return [
     `split=2[bg][fg]`,
@@ -725,12 +762,14 @@ function splitPlan(
   );
   // A negative bias puts the face lower inside the top panel, clear of the
   // hook card that sits in the top safe area.
-  const tracked = smoothTargets(targets, camGeometry, opts, camOnTop ? -0.3 : 0.14);
+  const tracked = smoothTargets(targets, camGeometry, opts, camOnTop ? -0.3 : 0.14, camOnTop);
+  const pipRect = camOnTop ? inferPipRect(targets, opts.sourceWidth, opts.sourceHeight) : undefined;
   return {
     mode: camOnTop ? 'split-cam-top' : 'split',
-    filter: splitFilter(gameGeometry, camGeometry, tracked.times, tracked.xs, tracked.ys, opts.outputWidth, opts.outputHeight, camOnTop),
+    filter: splitFilter(gameGeometry, camGeometry, tracked.times, tracked.xs, tracked.ys, opts.outputWidth, opts.outputHeight, camOnTop, pipRect),
     faceSamples: tracked.faceSamples,
     notice,
+    pipRect,
   };
 }
 
@@ -839,6 +878,7 @@ export function splitExpressionForSamples(
   outputHeight: number,
   duration: number,
   camOnTop = false,
+  pipRect?: PipRect,
 ): string {
   const topRatio = camOnTop ? SPLIT_CAM_TOP_RATIO : SPLIT_GAME_TOP_RATIO;
   const { topHeight, bottomHeight } = panelHeights(outputHeight, topRatio);
@@ -872,5 +912,5 @@ export function splitExpressionForSamples(
     xs.push(xs[xs.length - 1] ?? camGeometry.centerX);
     ys.push(ys[ys.length - 1] ?? camGeometry.centerY);
   }
-  return splitFilter(gameGeometry, camGeometry, times, xs, ys, outputWidth, outputHeight, camOnTop);
+  return splitFilter(gameGeometry, camGeometry, times, xs, ys, outputWidth, outputHeight, camOnTop, pipRect);
 }

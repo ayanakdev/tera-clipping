@@ -7,6 +7,7 @@ import type {
   ClipRecord,
   FaceSample,
   LayoutNotice,
+  PipRect,
   QualityMode,
   RenderAcceleration,
   Word,
@@ -234,6 +235,8 @@ export interface RenderClipResult {
   faceSamples?: FaceSample[];
   /** Present when `auto` framing inspected the source. */
   notice?: LayoutNotice;
+  /** Webcam overlay masked out of the game panel. */
+  pipRect?: PipRect;
   duration: number;
   renderMs: number;
 }
@@ -272,8 +275,10 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
   );
   let filter: string;
   let faceSamples: FaceSample[] | undefined;
+  let pipRect: PipRect | undefined;
   if (options.reuseFraming && clip.faceSamples?.length) {
     faceSamples = clip.faceSamples;
+    pipRect = clip.pipRect;
     if (clip.framing === 'auto') notice = clip.notice;
     filter =
       effectiveFraming === 'blur'
@@ -283,7 +288,7 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
           : effectiveFraming === 'split'
             ? splitExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, output.width, output.height, duration)
             : effectiveFraming === 'split-cam-top'
-              ? splitExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, output.width, output.height, duration, true)
+              ? splitExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, output.width, output.height, duration, true, clip.pipRect)
               : cropExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration);
   } else {
     const plan = await planReframe({
@@ -302,6 +307,7 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
     filter = plan.filter;
     faceSamples = plan.faceSamples.length ? plan.faceSamples : undefined;
     notice = plan.notice;
+    pipRect = plan.pipRect;
   }
 
   options.onProgress?.(32, 'Writing captions');
@@ -438,7 +444,7 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
     `rendered ${clip.id} (${duration.toFixed(1)}s) in ${(renderMs / 1000).toFixed(1)}s via ${encoderUsed ?? 'libx264'}`,
   );
   options.onProgress?.(100, 'Ready');
-  return { files, faceSamples, notice, duration, renderMs };
+  return { files, faceSamples, notice, pipRect, duration, renderMs };
 }
 
 async function planBlurOnly(width: number, height: number): Promise<string> {

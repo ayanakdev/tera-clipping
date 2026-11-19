@@ -27,6 +27,14 @@ export type HookStyleId = 'white' | 'black' | 'purple' | 'none';
  */
 export type ReframeMode = 'auto' | 'smart' | 'split' | 'split-cam-top' | 'center' | 'blur';
 
+/** A stable region in source pixels where the stream's webcam overlay sits. */
+export interface PipRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 /** What `auto` framing noticed about the source, kept for the UI and re-renders. */
 export interface LayoutNotice {
   kind: 'single-cam' | 'game-cam' | 'no-face';
@@ -219,6 +227,8 @@ export interface ClipRecord {
   notice?: LayoutNotice;
   files: ClipFiles;
   faceSamples?: FaceSample[];
+  /** Webcam overlay in the source, removed from the game panel when stacked. */
+  pipRect?: PipRect;
   removedSilence?: number;
   renderMs?: number;
   starred?: boolean;
