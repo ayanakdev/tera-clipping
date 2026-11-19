@@ -95,17 +95,16 @@ A clip that starts mid-thought is unusable, however strong the moment was. Befor
 
 Every candidate is scored on `setup`, `resolution` and `ending`; clips that fail are used only to fill a shortfall, never to pad the library. The verdict is written to the clip's **why this clip** line, and the same checklist is sent to Gemini, which is told to reject any id that fails it. Titles and hooks are built from complete spoken lines only — a hard-truncated fragment like "going for flight box to be down on the" is never used as a title.
 
-Live auto-clips wait for a 24 s tail to be recorded instead of clipping the instant chat reacts, so the answer lands inside the window. To inspect a stored project without re-rendering, run `npx tsx scripts/probe-story.ts <projectId>`: it replays the saved transcript through the local analyser and prints what a cold viewer sees at the start and end of each pick.
+Live auto-clips wait for a 24 s tail to be recorded instead of clipping the instant chat reacts, so the answer lands inside the window. A chat surge alone never arms auto-clip: it must coincide with a real audio beat inside the window, so raids, donations and late reactions do not become projects. To inspect a stored project without re-rendering, run `npx tsx scripts/probe-story.ts <projectId>`: it replays the saved transcript through the local analyser and prints what a cold viewer sees at the start and end of each pick.
 
 ### Auto framing (smart noticing)
 
 The default **Auto** mode samples a clip before rendering and notices its layout before choosing a crop:
 
 - **One full-frame camera** (IRL, just chatting, a webcam filling the stream) is tracked like **Smart**. The face stays centred in the vertical frame. Nothing is stacked, so the same facecam cannot appear twice.
-- **A corner facecam over a moving game scene** becomes **Game + cam**: the game keeps the top 62% and a tracked crop of the webcam fills the bottom 38%.
-- If no stable face is found, the clip keeps the centre of the frame.
+- **A corner facecam over gameplay** becomes **Cam + game**: a tracked crop of the webcam fills the top 36% and the *whole* 16:9 game frame is fitted into the bottom 64% over a blurred copy of itself, so the HUD and edge action stay visible. Dark or slow games still count — the signal is a small face in the corner of a landscape source, not motion alone.
 
-Each clip stores what was noticed (`single cam` or `game + cam`), so an edit re-render reuses the same layout instead of guessing again. Projects rendered before Auto existed can be fixed in one click with **Re-notice framing** on the project page: it switches every finished clip to Auto, re-renders them one by one, and logs the result. Live auto-clips use Auto automatically, whatever the old gameplay-only default was; pick **Centre** or **Blur fill** in Settings to override it. Existing v1 settings are migrated once, and the decision is written to the project log for each clip.
+Text stays inside the platform safe area: the hook sits in the top reserve, and burned captions for this layout are raised clear of the bottom UI zone. If no stable face is found, the clip keeps the centre of the frame. Each clip stores what was noticed (`single cam` or `cam + game`), so an edit re-render reuses the same layout instead of guessing again. Projects rendered before Auto existed can be fixed in one click with **Re-notice framing** on the project page: it switches every finished clip to Auto, re-renders them one by one, and logs the result. Live auto-clips use Auto automatically, whatever the old gameplay-only default was; pick **Centre** or **Blur fill** in Settings to override it. Existing v1 settings are migrated once, and the decision is written to the project log for each clip.
 
 ### Caption size
 

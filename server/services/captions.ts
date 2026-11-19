@@ -168,6 +168,8 @@ export interface CaptionOptions {
   overlayTitle?: string;
   /** Edited subtitle lines. When present these replace word-derived cues. */
   subtitles?: SubtitleCue[];
+  /** Override the vertical centre of the caption stack (safe-area aware). */
+  centerY?: number;
 }
 
 function scaleValue(raw: number | undefined): number {
@@ -188,7 +190,8 @@ function makeCues(words: Word[], options: CaptionOptions): Cue[] {
   const maxCueSeconds = preset.id === 'beast' ? 1.4 : preset.id === 'clean' ? 3.8 : 3.4;
   const lineHeight = fontSize * 1.16;
   const position =
-    options.aspect === '9:16' ? frameH * 0.745 : options.aspect === '1:1' ? frameH * 0.8 : frameH * 0.82;
+    options.centerY ??
+    (options.aspect === '9:16' ? frameH * 0.745 : options.aspect === '1:1' ? frameH * 0.8 : frameH * 0.82);
   const centerX = frameW / 2;
   const padX = Math.round(fontSize * 0.62);
   const padY = Math.round(fontSize * 0.38);
@@ -299,7 +302,8 @@ function makeSubtitleCues(subtitles: SubtitleCue[], options: CaptionOptions): Cu
   const maxTextWidth = Math.min(frameW - 130, preset.box ? 840 : 1000);
   const lineHeight = fontSize * 1.16;
   const position =
-    options.aspect === '9:16' ? frameH * 0.745 : options.aspect === '1:1' ? frameH * 0.8 : frameH * 0.82;
+    options.centerY ??
+    (options.aspect === '9:16' ? frameH * 0.745 : options.aspect === '1:1' ? frameH * 0.8 : frameH * 0.82);
   const centerX = frameW / 2;
   const padX = Math.round(fontSize * 0.62);
   const padY = Math.round(fontSize * 0.38);

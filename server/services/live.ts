@@ -239,35 +239,43 @@ function scoreMoment(runtime: Runtime, point: HeatPoint): void {
   const audioZ = audioStats.sd > 0.012 ? (audio - audioStats.mean) / audioStats.sd : audio >= 0.55 ? 1.2 : 0;
   const chatZ = chatStats.sd > 0.08 ? (chat - chatStats.mean) / chatStats.sd : chat >= Math.max(4, chatStats.mean * 2.2) ? 1.6 : 0;
   const audioSpike = audioZ >= 1.25 && audio >= 0.4;
-  const chatSpike = chatZ >= 1.7 && chat >= 4;
-  if (!audioSpike && !chatSpike) return;
+  const chatSpike = chatZ >= 2.0 && chat >= 6;
 
-  const combined =
-    Math.max(audioZ * 0.62, chatZ * 0.55) +
-    Math.max(0, audioZ) * 0.18 +
-    Math.max(0, chatZ) * 0.12;
-  const score = Math.round(clamp01(0.42 + combined * 0.34) * 100);
-  if (score < 30) return;
-
-  // Chat reacts after the moment. Rewind a configurable amount, then snap to
-  // the strongest nearby audio beat so the clip lands on the actual payoff.
+  // Chat reacts after the moment and also spikes on raids, donations and bot
+  // floods. Require a real audio beat at the rewound point before a chat spike
+  // can arm auto-clip, otherwise every alert becomes a "viral moment".
   const settings = store.getSettings();
   const chatLag = chatSpike ? Math.max(0, Math.min(45, settings.liveChatLag ?? 14)) : 0;
   let anchor = point.t;
+  let bestAudio = 0;
+  let bestAudioZ = 0;
   if (chatLag > 0) {
     anchor = Math.max(0, point.t - chatLag);
-    let bestAudio = 0;
     let bestT = anchor;
     for (const candidate of runtime.heat) {
       if (candidate.t < anchor - 8 || candidate.t > anchor + 6) continue;
-      if ((candidate.audio ?? 0) > bestAudio) {
-        bestAudio = candidate.audio ?? 0;
+      const level = candidate.audio ?? 0;
+      if (level > bestAudio) {
+        bestAudio = level;
+        bestAudioZ = audioStats.sd > 0.012 ? (level - audioStats.mean) / audioStats.sd : 0;
         bestT = candidate.t;
       }
     }
-    if (bestAudio >= 0.45) anchor = bestT;
+    // No loud beat near the rewound point: it was chat noise, not a moment.
+    if (bestAudio < 0.45) return;
+    anchor = bestT;
   }
+  const audioBacked = audioSpike || (chatSpike && bestAudio >= 0.5 && bestAudioZ >= 0.8);
+  if (!audioBacked) return;
 
+  const combined =
+    Math.max(audioZ * 0.62, chatZ * 0.35) +
+    Math.max(0, audioZ) * 0.18 +
+    Math.max(0, chatZ) * 0.08;
+  const score = Math.round(clamp01(0.42 + combined * 0.34) * 100);
+  if (score < 30) return;
+
+  const trigger: LiveMoment['trigger'] = chatSpike ? 'chat+audio' : 'audio';
   const reason =
     [
       audioSpike ? `audio spike (${audioZ.toFixed(1)}σ)` : null,
@@ -286,12 +294,19 @@ function scoreMoment(runtime: Runtime, point: HeatPoint): void {
       last.t = Math.round(anchor * 10) / 10;
       last.score = score;
       last.reason = reason;
+      last.trigger = trigger;
       publish(runtime);
     }
     return;
   }
 
-  const moment: LiveMoment = { id: `mom_${nanoid(7)}`, t: Math.round(anchor * 10) / 10, score, reason };
+  const moment: LiveMoment = {
+    id: `mom_${nanoid(7)}`,
+    t: Math.round(anchor * 10) / 10,
+    score,
+    reason,
+    trigger,
+  };
   runtime.session.moments.push(moment);
   runtime.session.moments = runtime.session.moments.slice(-80);
   logTo(runtime, 'info', `Moment at ${formatClock(moment.t)} — ${reason} (${moment.score})`);
@@ -325,6 +340,15 @@ async function maybeAutoClip(runtime: Runtime, moment: LiveMoment): Promise<void
     await new Promise<void>((resolve) => setTimeout(resolve, 1500));
   }
   if (runtime.stopping) return;
+  // Final quality gate: a moment must have real spoken audio inside the cut
+  // window. Chat-only alerts were already rejected in scoreMoment; this also
+  // rejects a lucky spike whose tail turned out to be silent.
+  const windowHeat = runtime.heat.filter((point) => point.t >= moment.t - 12 && point.t <= moment.t + tail);
+  if (moment.trigger === 'chat+audio') {
+    if (!windowHeat.some((point) => (point.audio ?? 0) >= 0.5 && (point.chat ?? 0) >= 4)) return;
+  } else if (windowHeat.filter((point) => (point.audio ?? 0) >= 0.45).length < 2) {
+    return;
+  }
   runtime.lastAutoClipAt = runtime.duration;
 
   const lookback = Math.max(20, Math.min(180, settings.liveLookback || 90));

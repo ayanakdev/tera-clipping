@@ -1040,7 +1040,7 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
             <Badge tone="violet">{preset.name}</Badge>
             <Badge tone="neutral">
               {form.framing === 'auto'
-                ? `Auto · ${clip.notice?.mode === 'split' ? 'game + cam' : clip.notice ? 'single cam' : 'noticing'}`
+                ? `Auto · ${clip.notice?.mode === 'split' ? 'game + cam' : clip.notice?.mode === 'split-cam-top' ? 'cam + game' : clip.notice ? 'single cam' : 'noticing'}`
                 : REFRAME_LABELS[form.framing] ?? form.framing}
             </Badge>
           </div>
@@ -1318,7 +1318,9 @@ function ClipEditor({ project, clip, onClose, onChanged, onToast, onDelete }: Ed
                   form.framing === 'auto' && clip.notice
                     ? clip.notice.mode === 'split'
                       ? 'noticed game + cam'
-                      : 'noticed one camera'
+                      : clip.notice.mode === 'split-cam-top'
+                        ? 'noticed cam + game'
+                        : 'noticed one camera'
                     : undefined
                 }
               >

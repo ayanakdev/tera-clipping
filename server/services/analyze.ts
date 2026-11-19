@@ -695,13 +695,16 @@ function scoreCandidate(
   let score =
     hook * 22 +
     emotion * 16 +
-    selfContained * 26 +
+    selfContained * 30 +
     payoff * 13 +
-    audioScore * 6 +
-    chat * 4 +
+    audioScore * 3 +
+    chat * 2 +
     durationFit * 4 +
     7; // novelty baseline, adjusted during selection
-  if (!story.passes) score -= 12;
+  if (!story.passes) score -= 18;
+  // Reward the full arc: a named subject, an answered question and a finished
+  // sentence. This is the reel shape a cold viewer can follow without context.
+  if (story.passes && story.resolution >= 88 && story.ending >= 100) score += 5;
   return { score: Math.round(score * 10) / 10, parts, audioScore, chat, story };
 }
 
@@ -862,7 +865,7 @@ function titleFor(phrase: string, category: string, fullText = ''): string {
     wholesome: 'The wholesome moment',
     reaction: 'The reaction says it all',
     tutorial: 'The tip that changed everything',
-    moment: 'The moment everything changed',
+    moment: 'A moment worth watching',
   };
   return fallback[category] || fallback.moment!;
 }
@@ -906,8 +909,6 @@ function reasonFor(parts: ScoreParts): string {
     ['emotion', 'high emotional energy'],
     ['selfContained', 'a self-contained story'],
     ['payoff', 'a clean payoff'],
-    ['audio', 'an audio spike'],
-    ['chat', 'chat heat'],
   ];
   const winners = labels
     .filter(([key]) => (parts[key] ?? 0) >= 62)
@@ -1040,7 +1041,7 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
   const consider = [...working];
   const bestAvailable = consider.reduce((max, candidate) => Math.max(max, candidate.baseScore), 0);
   // A clip that only scores by default weights should not pad the library.
-  const minimumScore = Math.max(42, bestAvailable * 0.62);
+  const minimumScore = Math.max(50, bestAvailable * 0.62);
   // First pass only accepts clips that answer the story questions. Weak clips
   // are used only to fill a shortfall, never to pad a library.
   let allowWeak = false;
@@ -1059,14 +1060,15 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
       if (!best || adjusted > best.adjusted) best = { candidate, adjusted };
     }
     if (!best) {
-      if (!allowWeak) {
+      if (!allowWeak && selected.length === 0) {
+        // A source with no complete story still gets one clip rather than an
+        // empty project, but we never pad a good set with broken clips.
         allowWeak = true;
         continue;
       }
       break;
     }
-    // Always allow one pick, but stop padding once the remaining pool is weak.
-    if (selected.length > 0 && best.adjusted < Math.max(36, minimumScore - 8)) break;
+    if (selected.length > 0 && best.adjusted < Math.max(48, minimumScore)) break;
     best.candidate.score = Math.round(best.adjusted * 10) / 10;
     best.candidate.scoreParts.novelty = Math.round((1 - selected.reduce((max, other) => Math.max(max, jaccard(best!.candidate.textSet, other.textSet)), 0)) * 100);
     selected.push(best.candidate);
@@ -1084,7 +1086,16 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
   let geminiCalls = 0;
   let cachedCalls = 0;
   let failures = 0;
-  const poolForGemini = [...selected, ...working.filter((candidate) => !selected.some((item) => item.id === candidate.id)).sort((a, b) => b.baseScore - a.baseScore)].slice(
+  const poolForGemini = [
+    ...selected,
+    ...working
+      .filter((candidate) => !selected.some((item) => item.id === candidate.id))
+      // Quiet but complete stories must reach Gemini, not just the loudest.
+      .sort((a, b) =>
+        Number(b.story.passes) - Number(a.story.passes) ||
+        b.baseScore - a.baseScore,
+      ),
+  ].slice(
     0,
     settings.aiMode === 'full' ? 26 : 14,
   );

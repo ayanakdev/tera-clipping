@@ -365,7 +365,7 @@ async function detectTargets(opts: ReframeOptions, measureMotion = false): Promi
  * moving game. Full-frame streamers sit near the middle; a game cam lives in a
  * corner. This is what stops a just-chatting stream from being stacked twice.
  */
-function noticeLayout(targets: FrameTarget[], sourceWidth: number): LayoutNotice {
+function noticeLayout(targets: FrameTarget[], sourceWidth: number, sourceHeight: number): LayoutNotice {
   const faceTargets = targets.filter((target) => target.cx !== null);
   if (!faceTargets.length) {
     return {
@@ -390,18 +390,21 @@ function noticeLayout(targets: FrameTarget[], sourceWidth: number): LayoutNotice
     .filter((motion): motion is number => motion !== null && Number.isFinite(motion));
   const medianMotion = median(motions) ?? 0;
 
-  const smallFace = coverage >= 0.55 && medianWidth <= 0.22;
-  const cornerFace = outerRatio >= 0.55;
-  // A full-frame camera can sit off-centre and still be the only thing on
-  // screen. Require measurable motion *outside* the face before calling it a
-  // game + cam layout, otherwise an IRL stream gets stacked twice.
-  const movingScene = medianMotion >= 7;
-  if (smallFace && cornerFace && movingScene) {
+  // Dark scenes make YuNet miss many frames. A handful of consistent small,
+  // corner detections is enough; full-frame streamers fail the width test.
+  const smallFace = (coverage >= 0.55 || faceTargets.length >= 8) && medianWidth <= 0.2;
+  const cornerFace = outerRatio >= 0.6;
+  // A small face pinned in the corner of a landscape source is a webcam over
+  // gameplay, even when the game is dark or slow. Motion only feeds confidence;
+  // requiring a loud motion spike caused night/time-lapse games to be
+  // misread as single-camera streams.
+  const landscape = sourceWidth / Math.max(1, sourceHeight) >= 1.5;
+  if (landscape && smallFace && cornerFace) {
     return {
       kind: 'game-cam',
-      mode: 'split',
-      confidence: Math.round(Math.min(1, outerRatio * 0.7 + Math.min(1, medianMotion / 18) * 0.3) * 100) / 100,
-      reason: 'Noticed a small corner facecam over a moving scene — stacking game and cam.',
+      mode: 'split-cam-top',
+      confidence: Math.round(Math.min(1, outerRatio * 0.55 + Math.min(1, medianMotion / 18) * 0.25 + 0.2) * 100) / 100,
+      reason: 'Noticed a corner facecam over gameplay — stacking cam above the full game frame.',
     };
   }
   return {
@@ -556,12 +559,41 @@ function centreFilter(geometry: CropGeometry, outputWidth: number, outputHeight:
   return `crop=${geometry.cropW}:${geometry.cropH}:${Math.round(geometry.centerX)}:${Math.round(geometry.centerY)},scale=${outputWidth}:${outputHeight}:flags=lanczos,setsar=1`;
 }
 
-const SPLIT_TOP_RATIO = 0.62;
+/** Legacy layout: game on top, facecam underneath. */
+export const SPLIT_GAME_TOP_RATIO = 0.62;
+/** New layout: tracked facecam above, full game frame below. */
+export const SPLIT_CAM_TOP_RATIO = 0.36;
+
+/** Even panel heights so vstack + yuv420p never see odd dimensions. */
+export function panelHeights(
+  outputHeight: number,
+  topRatio: number,
+): { topHeight: number; bottomHeight: number } {
+  const topHeight = Math.max(2, Math.round((outputHeight * topRatio) / 2) * 2);
+  return { topHeight, bottomHeight: Math.max(2, outputHeight - topHeight) };
+}
+
+/** Worst-case union of TikTok/Reels/Shorts UI reserves on a 1080x1920 frame. */
+const SAFE_FRACTIONS = {
+  top: 380 / 1920,
+  right: 120 / 1080,
+  bottom: 420 / 1920,
+  left: 60 / 1080,
+} as const;
+
+export function safeInsets(width: number, height: number) {
+  return {
+    top: Math.round(height * SAFE_FRACTIONS.top),
+    right: Math.round(width * SAFE_FRACTIONS.right),
+    bottom: Math.round(height * SAFE_FRACTIONS.bottom),
+    left: Math.round(width * SAFE_FRACTIONS.left),
+  };
+}
 
 /**
- * Gameplay + facecam vertical layout. The game keeps the top 62% of the
- * frame (centre-cropped to fill it) while the tracked webcam panel fills the
- * bottom 38%. This is the standard stacked Shorts/TikTok stream layout.
+ * Vertical stack for gameplay + facecam. `camOnTop` puts the tracked facecam
+ * on top and fits the whole 16:9 game frame underneath over a blurred copy of
+ * itself, so HUD, minimap and edge threats stay visible without black bars.
  */
 function splitFilter(
   gameGeometry: CropGeometry,
@@ -571,9 +603,12 @@ function splitFilter(
   camYs: number[],
   outputWidth: number,
   outputHeight: number,
+  camOnTop = false,
 ): string {
-  const topHeight = Math.round(outputHeight * SPLIT_TOP_RATIO);
-  const bottomHeight = outputHeight - topHeight;
+  const topRatio = camOnTop ? SPLIT_CAM_TOP_RATIO : SPLIT_GAME_TOP_RATIO;
+  const { topHeight, bottomHeight } = panelHeights(outputHeight, topRatio);
+  const gameH = camOnTop ? bottomHeight : topHeight;
+  const camH = camOnTop ? topHeight : bottomHeight;
   const xExpr = axisExpression(
     simplify(camTimes.map((t, i) => ({ t, v: camXs[i]! })), Math.max(1, camGeometry.cropW * 0.006)),
     0,
@@ -585,11 +620,20 @@ function splitFilter(
     camGeometry.maxY,
   );
   const camCrop = `crop=${camGeometry.cropW}:${camGeometry.cropH}:'${xExpr}':'${yExpr}'`;
+  const gamePanel = camOnTop
+    ? [
+        '[game]split=2[gbg][gfg]',
+        `[gbg]scale=${outputWidth}:${gameH}:force_original_aspect_ratio=increase,crop=${outputWidth}:${gameH},gblur=sigma=20,eq=brightness=-0.14[gb]`,
+        `[gfg]scale=${outputWidth}:${gameH}:force_original_aspect_ratio=decrease[gs]`,
+        '[gb][gs]overlay=(W-w)/2:(H-h)/2,setsar=1[gp]',
+      ].join(';')
+    : `[game]crop=${gameGeometry.cropW}:${gameGeometry.cropH}:${Math.round(gameGeometry.centerX)}:${Math.round(gameGeometry.centerY)},scale=${outputWidth}:${gameH}:flags=lanczos,setsar=1[gp]`;
+  const dividerY = camOnTop ? 'ih-3' : '0';
   return [
     'split=2[game][cam]',
-    `[game]crop=${gameGeometry.cropW}:${gameGeometry.cropH}:${Math.round(gameGeometry.centerX)}:${Math.round(gameGeometry.centerY)},scale=${outputWidth}:${topHeight}:flags=lanczos,setsar=1[top]`,
-    `[cam]${camCrop},scale=${outputWidth}:${bottomHeight}:flags=lanczos,setsar=1,drawbox=x=0:y=0:w=iw:h=3:color=black@0.55:t=fill[bottom]`,
-    '[top][bottom]vstack=inputs=2,setsar=1',
+    gamePanel,
+    `[cam]${camCrop},scale=${outputWidth}:${camH}:flags=lanczos,setsar=1,drawbox=x=0:y=${dividerY}:w=iw:h=3:color=black@0.55:t=fill[cp]`,
+    camOnTop ? '[cp][gp]vstack=inputs=2,setsar=1' : '[gp][cp]vstack=inputs=2,setsar=1',
   ].join(';');
 }
 
@@ -598,12 +642,22 @@ function camGeometryForFaceWidths(
   sourceHeight: number,
   faceWidths: number[],
   targetAspect: number,
+  widthMultiplier = 3.2,
+  maxHeightRatio = 0.82,
+  faceHeightMultiplier = 2.2,
+  faceHeights: number[] = [],
 ): CropGeometry {
   const clean = faceWidths.filter((width) => Number.isFinite(width) && width > 4).sort((a, b) => a - b);
   const faceWidth = clean.length ? clean[Math.floor(clean.length / 2)]! : sourceWidth * 0.26;
-  let cropW = clamp(faceWidth * 3.2, sourceWidth * 0.18, sourceWidth * 0.68);
+  let cropW = clamp(faceWidth * widthMultiplier, sourceWidth * 0.18, sourceWidth * 0.68);
   let cropH = cropW / targetAspect;
-  const maxH = sourceHeight * 0.82;
+  const heights = faceHeights.filter((height) => Number.isFinite(height) && height > 4).sort((a, b) => a - b);
+  if (heights.length) {
+    // A top-panel facecam needs head + shoulders, not just the detected face.
+    cropH = Math.max(cropH, heights[Math.floor(heights.length / 2)]! * faceHeightMultiplier);
+    cropW = cropH * targetAspect;
+  }
+  const maxH = sourceHeight * maxHeightRatio;
   if (cropH > maxH) {
     cropH = maxH;
     cropW = cropH * targetAspect;
@@ -625,12 +679,19 @@ function camGeometryForTargets(
   sourceHeight: number,
   targets: FrameTarget[],
   targetAspect: number,
+  widthMultiplier = 3.2,
+  maxHeightRatio = 0.82,
+  faceHeightMultiplier = 2.2,
 ): CropGeometry {
   return camGeometryForFaceWidths(
     sourceWidth,
     sourceHeight,
     targets.map((target) => (target.fw ? target.fw * sourceWidth : 0)),
     targetAspect,
+    widthMultiplier,
+    maxHeightRatio,
+    faceHeightMultiplier,
+    targets.map((target) => (target.fh ? target.fh * sourceHeight : 0)),
   );
 }
 
@@ -643,20 +704,31 @@ function blurFilter(outputWidth: number, outputHeight: number): string {
   ].join(';');
 }
 
-function splitPlan(opts: ReframeOptions, targets: FrameTarget[], notice?: LayoutNotice): ReframePlan {
-  const topHeight = Math.round(opts.outputHeight * SPLIT_TOP_RATIO);
-  const bottomHeight = opts.outputHeight - topHeight;
-  const gameGeometry = geometryForRatio(opts.sourceWidth, opts.sourceHeight, opts.outputWidth / topHeight);
+function splitPlan(
+  opts: ReframeOptions,
+  targets: FrameTarget[],
+  notice?: LayoutNotice,
+  camOnTop = false,
+): ReframePlan {
+  const topRatio = camOnTop ? SPLIT_CAM_TOP_RATIO : SPLIT_GAME_TOP_RATIO;
+  const { topHeight, bottomHeight } = panelHeights(opts.outputHeight, topRatio);
+  const gameH = camOnTop ? bottomHeight : topHeight;
+  const camH = camOnTop ? topHeight : bottomHeight;
+  const gameGeometry = geometryForRatio(opts.sourceWidth, opts.sourceHeight, opts.outputWidth / gameH);
   const camGeometry = camGeometryForTargets(
     opts.sourceWidth,
     opts.sourceHeight,
     targets,
-    opts.outputWidth / bottomHeight,
+    opts.outputWidth / camH,
+    3.2,
+    camOnTop ? 0.62 : 0.82,
   );
-  const tracked = smoothTargets(targets, camGeometry, opts, 0.14);
+  // A negative bias puts the face lower inside the top panel, clear of the
+  // hook card that sits in the top safe area.
+  const tracked = smoothTargets(targets, camGeometry, opts, camOnTop ? -0.3 : 0.14);
   return {
-    mode: 'split',
-    filter: splitFilter(gameGeometry, camGeometry, tracked.times, tracked.xs, tracked.ys, opts.outputWidth, opts.outputHeight),
+    mode: camOnTop ? 'split-cam-top' : 'split',
+    filter: splitFilter(gameGeometry, camGeometry, tracked.times, tracked.xs, tracked.ys, opts.outputWidth, opts.outputHeight, camOnTop),
     faceSamples: tracked.faceSamples,
     notice,
   };
@@ -684,8 +756,10 @@ export async function planReframe(opts: ReframeOptions): Promise<ReframePlan> {
       };
     }
     const targets = await detectTargets(opts, true);
-    const notice = noticeLayout(targets, opts.sourceWidth);
-    if (notice.mode === 'split') return splitPlan(opts, targets, notice);
+    const notice = noticeLayout(targets, opts.sourceWidth, opts.sourceHeight);
+    if (notice.mode === 'split-cam-top' || notice.mode === 'split') {
+      return splitPlan(opts, targets, notice, notice.mode === 'split-cam-top');
+    }
     const analysis = smoothTargets(targets, geometry, opts);
     return {
       mode: 'smart',
@@ -695,11 +769,11 @@ export async function planReframe(opts: ReframeOptions): Promise<ReframePlan> {
     };
   }
 
-  if (opts.mode === 'split') {
+  if (opts.mode === 'split' || opts.mode === 'split-cam-top') {
     if (opts.sourceWidth <= 16 || opts.sourceHeight <= 16) {
       return { mode: 'center', filter: centreFilter(geometry, opts.outputWidth, opts.outputHeight), faceSamples: [] };
     }
-    return splitPlan(opts, await detectTargets(opts));
+    return splitPlan(opts, await detectTargets(opts), undefined, opts.mode === 'split-cam-top');
   }
 
   if (opts.mode === 'center') {
@@ -764,15 +838,22 @@ export function splitExpressionForSamples(
   outputWidth: number,
   outputHeight: number,
   duration: number,
+  camOnTop = false,
 ): string {
-  const topHeight = Math.round(outputHeight * SPLIT_TOP_RATIO);
-  const bottomHeight = outputHeight - topHeight;
-  const gameGeometry = geometryForRatio(sourceWidth, sourceHeight, outputWidth / topHeight);
+  const topRatio = camOnTop ? SPLIT_CAM_TOP_RATIO : SPLIT_GAME_TOP_RATIO;
+  const { topHeight, bottomHeight } = panelHeights(outputHeight, topRatio);
+  const gameH = camOnTop ? bottomHeight : topHeight;
+  const camH = camOnTop ? topHeight : bottomHeight;
+  const gameGeometry = geometryForRatio(sourceWidth, sourceHeight, outputWidth / gameH);
   const camGeometry = camGeometryForFaceWidths(
     sourceWidth,
     sourceHeight,
     (faceSamples || []).map((sample) => (sample.fw ? sample.fw * sourceWidth : 0)),
-    outputWidth / bottomHeight,
+    outputWidth / camH,
+    3.2,
+    camOnTop ? 0.62 : 0.82,
+    2.2,
+    (faceSamples || []).map((sample) => (sample.fh ? sample.fh * sourceHeight : 0)),
   );
   const times: number[] = [];
   const xs: number[] = [];
@@ -791,5 +872,5 @@ export function splitExpressionForSamples(
     xs.push(xs[xs.length - 1] ?? camGeometry.centerX);
     ys.push(ys[ys.length - 1] ?? camGeometry.centerY);
   }
-  return splitFilter(gameGeometry, camGeometry, times, xs, ys, outputWidth, outputHeight);
+  return splitFilter(gameGeometry, camGeometry, times, xs, ys, outputWidth, outputHeight, camOnTop);
 }

@@ -202,7 +202,8 @@ export const HOOK_STYLES: Array<{
 export const REFRAME_LABELS: Record<ReframeMode, string> = {
   auto: 'Auto · notices layout',
   smart: 'Smart · tracks faces',
-  split: 'Game + cam · stacked',
+  split: 'Game + cam · game on top',
+  'split-cam-top': 'Cam + game · cam on top',
   center: 'Centre crop',
   blur: 'Blur fill',
 };

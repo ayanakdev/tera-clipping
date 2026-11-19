@@ -17,7 +17,7 @@ import { log } from '../lib/logger';
 import { parseFfmpegProgress, runProcess } from '../lib/process';
 import { writeCaptionFiles } from './captions';
 import { renderHookPng } from './hook';
-import { planReframe, cropExpressionForSamples, splitExpressionForSamples } from './reframe';
+import { planReframe, cropExpressionForSamples, splitExpressionForSamples, safeInsets } from './reframe';
 
 const QUALITY: Record<QualityMode, { preset: string; crf: number }> = {
   fast: { preset: 'veryfast', crf: 23 },
@@ -282,7 +282,9 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
           ? cropExpressionForSamples(undefined, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration)
           : effectiveFraming === 'split'
             ? splitExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, output.width, output.height, duration)
-            : cropExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration);
+            : effectiveFraming === 'split-cam-top'
+              ? splitExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, output.width, output.height, duration, true)
+              : cropExpressionForSamples(faceSamples, options.sourceWidth, options.sourceHeight, aspect, output.width, output.height, duration);
   } else {
     const plan = await planReframe({
       sourcePath: options.sourcePath,
@@ -303,12 +305,18 @@ export async function renderClip(options: RenderClipOptions): Promise<RenderClip
   }
 
   options.onProgress?.(32, 'Writing captions');
+  const insets = safeInsets(output.width, output.height);
+  const captionY =
+    effectiveFraming === 'split-cam-top'
+      ? Math.min(Math.round(output.height * 0.72), output.height - insets.bottom - 120)
+      : undefined;
   await writeCaptionFiles(relativeWords, assAbs, srtAbs, {
     preset: clip.captionPreset,
     aspect,
     duration,
     scale: clip.captionScale ?? 1,
     subtitles: clip.subtitles,
+    centerY: captionY,
   });
 
   options.onProgress?.(36, 'Building hook');

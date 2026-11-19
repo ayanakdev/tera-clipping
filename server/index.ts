@@ -73,7 +73,7 @@ const HOOK_IDS = new Set(HOOK_STYLES.map((style) => style.id));
 const AI_MODES = new Set(['smart', 'full', 'off']);
 const PACING = new Set(['original', 'balanced', 'tight']);
 const QUALITY = new Set(['fast', 'balanced', 'high']);
-const REFRAME = new Set(['auto', 'smart', 'split', 'center', 'blur']);
+const REFRAME = new Set(['auto', 'smart', 'split', 'split-cam-top', 'center', 'blur']);
 const ASR = new Set(['base.en', 'base', 'small.en', 'tiny.en']);
 const PLATFORM_IDS = new Set(PLATFORMS.map((platform) => platform.id));
 

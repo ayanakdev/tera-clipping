@@ -437,7 +437,8 @@ export default function Settings() {
                 >
                   <option value="auto">Auto · notice the layout</option>
                   <option value="smart">Smart · tracks faces</option>
-                  <option value="split">Gameplay + cam · stacked</option>
+                  <option value="split">Game + cam · game on top</option>
+                  <option value="split-cam-top">Cam + game · cam on top</option>
                   <option value="center">Center crop</option>
                   <option value="blur">Blur fill</option>
                 </Select>

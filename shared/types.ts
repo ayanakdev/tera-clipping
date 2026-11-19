@@ -20,12 +20,12 @@ export type HookStyleId = 'white' | 'black' | 'purple' | 'none';
 
 /**
  * `auto` notices the stream layout first: a full-frame camera is tracked like
- * `smart`, while a small cam overlaid on a moving game scene becomes `split`.
- * `smart` tracks the primary face and crops to it. `split` keeps the full
- * gameplay frame on top and adds a tracked face-camera crop underneath, which
- * is the layout most stream clips use on Shorts/TikTok/Reels.
+ * `smart`, while a small cam overlaid on a moving game scene becomes
+ * `split-cam-top` (tracked facecam above, whole game frame below). `smart`
+ * tracks the primary face and crops to it. `split` is the older game-on-top
+ * stack, kept for clips that already used it.
  */
-export type ReframeMode = 'auto' | 'smart' | 'split' | 'center' | 'blur';
+export type ReframeMode = 'auto' | 'smart' | 'split' | 'split-cam-top' | 'center' | 'blur';
 
 /** What `auto` framing noticed about the source, kept for the UI and re-renders. */
 export interface LayoutNotice {
@@ -339,6 +339,8 @@ export interface LiveMoment {
   t: number;
   score: number;
   reason: string;
+  /** Chat alone never arms auto-clip; a moment is always backed by audio. */
+  trigger: 'audio' | 'chat+audio';
   clipId?: string;
   projectId?: string;
 }
