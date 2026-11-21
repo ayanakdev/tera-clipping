@@ -1,11 +1,19 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 
+export interface AudioReaction {
+  t: number;
+  score: number;
+  kind: 'burst' | 'silence-to-sound' | 'sustained-variance';
+}
+
 export interface AudioAnalysis {
   /** RMS energy per 0.5s, normalised 0..1 */
   points: Array<{ t: number; value: number }>;
   /** local peaks where the 2s average is materially above the rolling baseline */
   peaks: Array<{ t: number; score: number }>;
+  /** Laugh/shout/surprise proxies derived from energy shape - not a classifier. */
+  reactions?: AudioReaction[];
   mean: number;
   max: number;
 }
@@ -123,5 +131,45 @@ export async function analyzeWav(file: string, windowSec = 0.5): Promise<AudioAn
     if (!prev || peak.score > prev.score) buckets.set(key, peak);
   }
 
-  return { points, peaks: [...buckets.values()].sort((a, b) => b.score - a.score).slice(0, 80), mean, max };
+  // Laugh / gasp / shout proxies from energy shape over the 0.5s points.
+  // These are honest signal heuristics, not a trained classifier: a burst is
+  // loud vs the prior 2s, silence-to-sound is a sudden reaction after a pause,
+  // sustained variance is the up-down modulation typical of laughter.
+  const reactions: AudioReaction[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const value = points[i]!.value;
+    const prior = points.slice(Math.max(0, i - 4), i).map((point) => point.value);
+    const priorMean = prior.reduce((a, b) => a + b, 0) / Math.max(1, prior.length);
+    const window = points.slice(Math.max(0, i - 4), i + 1).map((point) => point.value);
+    const windowMean = window.reduce((a, b) => a + b, 0) / Math.max(1, window.length);
+    const variance = window.reduce((acc, v) => acc + (v - windowMean) ** 2, 0) / Math.max(1, window.length);
+    const cv = windowMean > 0.01 ? Math.sqrt(variance) / windowMean : 0;
+    let kind: AudioReaction['kind'] | null = null;
+    let score = 0;
+    if (prior.length >= 2 && value > 0.4 && value / (priorMean + 0.02) > 1.7) {
+      kind = 'burst';
+      score = Math.min(1, (value / (priorMean + 0.02) - 1.7) * 0.5);
+    } else if (prior.length >= 2 && priorMean < 0.15 && value > 0.45) {
+      kind = 'silence-to-sound';
+      score = Math.min(1, (value - 0.45) * 2.5);
+    } else if (window.length >= 4 && windowMean > 0.35 && cv > 0.5) {
+      kind = 'sustained-variance';
+      score = Math.min(1, (cv - 0.5) * 1.5);
+    }
+    if (kind && score > 0.1) reactions.push({ t: points[i]!.t, score, kind });
+  }
+  const reactionBuckets = new Map<number, AudioReaction>();
+  for (const reaction of reactions) {
+    const key = Math.floor(reaction.t / 3);
+    const prev = reactionBuckets.get(key);
+    if (!prev || reaction.score > prev.score) reactionBuckets.set(key, reaction);
+  }
+
+  return {
+    points,
+    peaks: [...buckets.values()].sort((a, b) => b.score - a.score).slice(0, 80),
+    reactions: [...reactionBuckets.values()].sort((a, b) => b.score - a.score).slice(0, 80),
+    mean,
+    max,
+  };
 }

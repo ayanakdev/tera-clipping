@@ -31,7 +31,7 @@ import type {
   ReframeMode,
   SubtitleCue,
 } from '@shared/types';
-import { CAPTION_BY_ID, CAPTION_PRESETS, HOOK_STYLES, REFRAME_LABELS } from '@shared/presets';
+import { AUTO_CLIP_COUNT, CAPTION_BY_ID, CAPTION_PRESETS, HOOK_STYLES, REFRAME_LABELS } from '@shared/presets';
 import { cuesFromWords } from '@shared/utils';
 import { api, mediaUrl, type ClipPatch } from '@web/lib/api';
 import { clock, shortDate, timeAgo } from '@web/lib/format';
@@ -737,8 +737,9 @@ export default function ProjectPage() {
           selection. Nothing is re-downloaded.
         </p>
         <div style={{ display: 'grid', gap: 16, marginTop: 20 }}>
-          <Field label="How many clips?" hint={`${replanCount} of 10`}>
+          <Field label="How many clips?" hint={replanCount === AUTO_CLIP_COUNT ? 'every good moment' : `${replanCount} of 10`}>
             <Select value={String(replanCount)} onChange={(value) => setReplanCount(Number(value))}>
+              <option value={AUTO_CLIP_COUNT}>Auto — every good moment</option>
               {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
                 <option key={count} value={count}>
                   {count} clip{count === 1 ? '' : 's'}
@@ -764,7 +765,7 @@ export default function ProjectPage() {
             Keep these clips
           </Button>
           <Button icon={Wand2} loading={replanBusy} onClick={() => void submitReplan()}>
-            Replan {replanCount} clips
+            Replan {replanCount === AUTO_CLIP_COUNT ? 'in auto mode' : `${replanCount} clips`}
           </Button>
         </div>
       </Modal>

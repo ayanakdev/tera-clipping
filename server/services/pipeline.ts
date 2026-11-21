@@ -15,7 +15,7 @@ import type {
   SubtitleCue,
   Word,
 } from '../../shared/types';
-import { DEFAULT_SETTINGS } from '../../shared/presets';
+import { AUTO_CLIP_COUNT, DEFAULT_SETTINGS } from '../../shared/presets';
 import { cleanSpokenText } from '../../shared/utils';
 import { CONFIG, PATHS, fromData, toData } from '../config';
 import { bus } from '../lib/events';
@@ -148,7 +148,7 @@ function resolveSettings(partial?: Partial<ClipSettings>): ClipSettings {
     watermark: defaults.watermark,
   };
   const merged = { ...base, ...(partial || {}) };
-  merged.clipCount = Math.max(1, Math.min(10, Math.round(merged.clipCount)));
+  merged.clipCount = Math.max(AUTO_CLIP_COUNT, Math.min(10, Math.round(merged.clipCount)));
   merged.minDuration = Math.max(5, Math.min(180, merged.minDuration));
   merged.maxDuration = Math.max(merged.minDuration + 2, Math.min(240, merged.maxDuration));
   merged.captionScale = Math.max(0.6, Math.min(1.6, Number(merged.captionScale) || 1));

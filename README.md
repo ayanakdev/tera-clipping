@@ -1,6 +1,6 @@
 # TeraClip Studio
 
-**A local-first AI clipping studio.** Paste a stream, VOD or highlight link — or record a live channel straight to disk — and get 1–10 ready-to-post vertical clips with word-perfect animated captions, hook cards, smart face reframing and platform-ready posting kits.
+**A local-first AI clipping studio.** Paste a stream, VOD or highlight link — or record a live channel straight to disk — and get 1–10 ready-to-post vertical clips (or choose **Auto** to keep every qualifying moment) with word-perfect animated captions, hook cards, smart face reframing and platform-ready posting kits.
 
 No login. No database. No cloud dashboard. Every project, clip, campaign and counter lives in this folder.
 
@@ -96,6 +96,14 @@ A clip that starts mid-thought is unusable, however strong the moment was. Befor
 Every candidate is scored on `setup`, `resolution` and `ending`; clips that fail are used only to fill a shortfall, never to pad the library. The verdict is written to the clip's **why this clip** line, and the same checklist is sent to Gemini, which is told to reject any id that fails it. Titles and hooks are built from complete spoken lines only — a hard-truncated fragment like "going for flight box to be down on the" is never used as a title.
 
 Live auto-clips wait for a 24 s tail to be recorded instead of clipping the instant chat reacts, so the answer lands inside the window. A chat surge alone never arms auto-clip: it must coincide with a real audio beat inside the window, so raids, donations and late reactions do not become projects. To inspect a stored project without re-rendering, run `npx tsx scripts/probe-story.ts <projectId>`: it replays the saved transcript through the local analyser and prints what a cold viewer sees at the start and end of each pick.
+
+### Auto clip count
+
+Set **Clip count** to **Auto** in New Clips (or as the global default) and the analyser keeps **every** moment that passes the story, visual and score gates — no fixed 1–10 cap. A generous safety ceiling (50) prevents a very long stream from rendering endlessly, and the same story/visual/quality filters that stop padding in fixed mode still apply.
+
+### Finding the funny / unusual beat (with full context)
+
+A clip that is merely calm and well-punctuated is not automatically shareable. Alongside the story check, the analyser now rewards **reaction** signals from the audio (bursts, silence→sound, sustained energy variation — laugh/gasp/shout proxies, not a classifier) and **virality** cues in the transcript (surprise, contrast and superlative phrases; funny/hot-take/clutch categories). Gemini's shortlist is likewise told to favour the unusual, funny or high-stakes beat over a calm monologue. These signals only re-rank the sentence-aligned windows from the story check — none can create a mid-thought cut, and no extra model or cloud call is used.
 
 ### Auto framing (smart noticing)
 

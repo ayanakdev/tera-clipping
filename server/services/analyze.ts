@@ -12,6 +12,7 @@ import type {
 } from '../../shared/types';
 import { log } from '../lib/logger';
 import type { AudioAnalysis } from './audio';
+import { AUTO_CLIP_COUNT, MAX_AUTO_CLIPS } from '../../shared/presets';
 import { geminiAvailable, geminiBudgetLeft, geminiJson, parseJsonLoose } from './gemini';
 import { isSpeakableToken, stripSoundTags } from '../../shared/utils';
 
@@ -608,10 +609,10 @@ function hookPart(text: string): number {
   return clamp01(score);
 }
 
-function emotionPart(text: string, audio: number, chat: number): number {
+function emotionPart(text: string, audio: number, chat: number, reaction = 0): number {
   const hits = Math.min(0.55, countMatches(text, EMOTION_WORDS) * 0.09);
   const punctuation = (text.match(/[!?]/g) || []).length;
-  return clamp01(0.18 + hits + Math.min(0.14, punctuation * 0.035) + audio * 0.1 + chat * 0.08);
+  return clamp01(0.18 + hits + Math.min(0.14, punctuation * 0.035) + audio * 0.1 + chat * 0.08 + reaction * 0.15);
 }
 
 function selfContainedPart(unit: Unit, units: Unit[], index: number, text: string, duration: number, wordCount: number): number {
@@ -629,7 +630,7 @@ function selfContainedPart(unit: Unit, units: Unit[], index: number, text: strin
   return clamp01(score);
 }
 
-function payoffPart(text: string, audio: number): number {
+function payoffPart(text: string, audio: number, reaction = 0): number {
   const low = text.toLowerCase();
   const lastWords = textWords(low).slice(-14).join(' ');
   let score = 0.3;
@@ -638,6 +639,18 @@ function payoffPart(text: string, audio: number): number {
   if (endings.some((word) => PAYOFF_END.includes(word))) score += 0.12;
   if (/[.!?]$/.test(text.trim())) score += 0.08;
   if (audio > 0.55) score += Math.min(0.05, (audio - 0.55) * 0.35);
+  score += reaction * 0.08;
+  return clamp01(score);
+}
+
+/** Surprise / superlative / contrast markers that make a line travel. */
+function viralityPart(text: string, category: string): number {
+  const low = text.toLowerCase();
+  let score = 0.2;
+  score += Math.min(0.35, countMatches(low, HOOK_WORDS) * 0.08);
+  score += Math.min(0.2, (low.match(/[!?]/g) || []).length * 0.04);
+  if (/\b(turns out|turned out|i thought .{0,40} but|nobody expected|no way|you won't believe|plot twist)\b/.test(low)) score += 0.25;
+  if (category === 'funny' || category === 'hot take' || category === 'clutch') score += 0.15;
   return clamp01(score);
 }
 
@@ -668,12 +681,14 @@ function scoreCandidate(
   },
   audio: Series | null,
   chatHeat: Series | null,
+  reaction: Series | null,
 ): { score: number; parts: ScoreParts; audioScore: number; chat: number; story: StoryCheck } {
   const duration = candidate.end - candidate.start;
   const audioScore = seriesScore(audio, candidate.start, candidate.end);
   const chat = seriesScore(chatHeat, candidate.start, candidate.end, 0.4);
+  const reactionScore = seriesScore(reaction, candidate.start, candidate.end, 0.4);
   const hook = hookPart(candidate.unit.text);
-  const emotion = emotionPart(candidate.text, audioScore, chat);
+  const emotion = emotionPart(candidate.text, audioScore, chat, reactionScore);
   const story = storyCheckFor(candidate.units, candidate.firstIndex, candidate.lastIndex);
   const storyScore = (story.setup * 0.35 + story.resolution * 0.35 + story.ending * 0.3) / 100;
   // A complete story matters more than a loud moment: it is the main thing a
@@ -681,7 +696,9 @@ function scoreCandidate(
   const selfContained =
     selfContainedPart(candidate.unit, candidate.units, candidate.firstIndex, candidate.text, duration, candidate.wordCount) * 0.4 +
     storyScore * 0.6;
-  const payoff = payoffPart(candidate.text, audioScore);
+  const category = categoryFor(candidate.text);
+  const payoff = payoffPart(candidate.text, audioScore, reactionScore);
+  const viral = viralityPart(candidate.text, category);
   const durationFit = clamp01(1 - Math.abs(duration - 30) / 34);
   const parts: ScoreParts = {
     hook: Math.round(hook * 100),
@@ -690,6 +707,7 @@ function scoreCandidate(
     payoff: Math.round(payoff * 100),
     audio: Math.round(audioScore * 100),
     chat: Math.round(chat * 100),
+    reaction: Math.round(reactionScore * 100),
     novelty: 100,
   };
   let score =
@@ -700,6 +718,7 @@ function scoreCandidate(
     audioScore * 3 +
     chat * 2 +
     durationFit * 4 +
+    viral * 6 +
     7; // novelty baseline, adjusted during selection
   if (!story.passes) score -= 18;
   // Reward the full arc: a named subject, an answered question and a finished
@@ -909,6 +928,7 @@ function reasonFor(parts: ScoreParts): string {
     ['emotion', 'high emotional energy'],
     ['selfContained', 'a self-contained story'],
     ['payoff', 'a clean payoff'],
+    ['reaction', 'a strong reaction'],
   ];
   const winners = labels
     .filter(([key]) => (parts[key] ?? 0) >= 62)
@@ -1004,11 +1024,15 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
     input.chatHeat?.map((point) => ({ t: point.t, value: point.chat ?? point.heat ?? 0 })),
     undefined,
   );
+  const reactionSeries = makeSeries(
+    input.audio?.reactions?.map((reaction) => ({ t: reaction.t, value: reaction.score })),
+    undefined,
+  );
   const working: WorkingCandidate[] = [];
   for (let i = 0; i < pool.length; i++) {
     if (i % 200 === 0 && input.signal?.aborted) throw new DOMException('Analysis cancelled', 'AbortError');
     const entry = pool[i]!;
-    const { score, parts, story } = scoreCandidate(entry, audioSeries, chatSeries);
+    const { score, parts, story } = scoreCandidate(entry, audioSeries, chatSeries, reactionSeries);
     const phrase = cleanPhrase(entry.unit.text);
     const category = categoryFor(entry.text);
     const title = titleFor(phrase, category, entry.text);
@@ -1036,11 +1060,11 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
   }
 
   input.onProgress?.(30, 'Choosing the best moments');
-  const count = Math.max(1, Math.min(10, settings.clipCount));
+  const auto = settings.clipCount <= AUTO_CLIP_COUNT;
+  const count = auto ? MAX_AUTO_CLIPS : Math.max(1, Math.min(10, settings.clipCount));
   const selected: WorkingCandidate[] = [];
   const consider = [...working];
   const bestAvailable = consider.reduce((max, candidate) => Math.max(max, candidate.baseScore), 0);
-  // A clip that only scores by default weights should not pad the library.
   const minimumScore = Math.max(50, bestAvailable * 0.62);
   // First pass only accepts clips that answer the story questions. Weak clips
   // are used only to fill a shortfall, never to pad a library.
@@ -1086,6 +1110,7 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
   let geminiCalls = 0;
   let cachedCalls = 0;
   let failures = 0;
+  const geminiCap = auto ? Math.min(MAX_AUTO_CLIPS, 20) : count;
   const poolForGemini = [
     ...selected,
     ...working
@@ -1095,10 +1120,7 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
         Number(b.story.passes) - Number(a.story.passes) ||
         b.baseScore - a.baseScore,
       ),
-  ].slice(
-    0,
-    settings.aiMode === 'full' ? 26 : 14,
-  );
+  ].slice(0, auto ? 32 : settings.aiMode === 'full' ? 26 : 14);
 
   const shouldUseGemini =
     settings.aiMode !== 'off' && geminiAvailable() && geminiBudgetLeft() > 0 && !input.signal?.aborted;
@@ -1112,7 +1134,7 @@ export async function analyzeTranscript(input: AnalyzeInput): Promise<AnalyzeRes
         maxOutputTokens: 4096,
         signal: input.signal,
         prompt: buildPrompt(poolForGemini, {
-          count,
+          count: geminiCap,
           minDuration,
           maxDuration,
           platform: input.platform,
@@ -1268,7 +1290,7 @@ RULES
 - Every clip MUST stand on its own for a cold viewer: setup, beat and payoff all inside the range.
 - Never start a clip on "it", "that", "this", "so", "and", "but", "like" or any dangling reference unless the selected range already includes the line it refers to. The local range has been snapped to sentences, so trust it over a mid-thought timestamp.
 - Never end a clip on a dangling word such as "and", "because" or "the". Prefer the end of a complete sentence.
-- Rank by scroll-stopping power for a cold viewer, not by importance to the stream.
+- Rank by scroll-stopping power for a cold viewer, not by importance to the stream. Favour the unusual, funny, surprising or high-stakes beat over a calm monologue.
 - Do not select two clips covering the same beat or the same joke. If two ids overlap heavily, pick only the stronger one.
 - Write hooks like a streamer editor: max 8 words, one natural iPhone-style emoji (😭 😳 🔥 💀 👀), no quotation marks, no trailing "and"/"but"/"so", and nothing that the clip does not deliver. A hook must be a complete phrase, never a truncated transcript fragment.
 - Titles: max 7 words, title case, no emoji, no generic filler like "The moment everything changed". Quote or paraphrase the actual spoken line when possible.

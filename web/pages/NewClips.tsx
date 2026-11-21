@@ -29,8 +29,8 @@ import type {
   QualityMode,
   ReframeMode,
 } from '@shared/types';
-import { CAPTION_BY_ID } from '@shared/presets';
-import { CAPTION_PRESETS, HOOK_STYLES, REFRAME_LABELS } from '@shared/presets';
+import { AUTO_CLIP_COUNT, CAPTION_BY_ID } from '@shared/presets';
+import { CAPTION_PRESETS, HOOK_STYLES, MAX_AUTO_CLIPS, REFRAME_LABELS } from '@shared/presets';
 import { api, type ResolvedImport } from '@web/lib/api';
 import { bytes, clamp, clock, estimateRenderSeconds, hostOf } from '@web/lib/format';
 import { useAsyncData } from '@web/lib/hooks';
@@ -70,7 +70,7 @@ const AI_COPY: Record<AiMode, string> = {
 
 function toSettings(defaults: Partial<ClipSettings> | undefined): ClipSettings {
   return {
-    clipCount: clamp(defaults?.clipCount ?? 5, 1, 10),
+    clipCount: clamp(defaults?.clipCount ?? 5, AUTO_CLIP_COUNT, 10),
     minDuration: clamp(defaults?.minDuration ?? 18, 5, 90),
     maxDuration: clamp(defaults?.maxDuration ?? 45, 10, 180),
     aspect: defaults?.aspect ?? '9:16',
@@ -151,7 +151,7 @@ export default function NewClips() {
   const preset: ClipPresetVisual = CAPTION_BY_ID[settings.captionPreset] ?? CAPTION_PRESETS[0];
   const platformList = (bootstrap?.platforms ?? []).filter((platform) => platform.id !== 'upload');
   const estimated = estimateRenderSeconds({
-    clipCount: settings.clipCount,
+    clipCount: settings.clipCount === AUTO_CLIP_COUNT ? MAX_AUTO_CLIPS : settings.clipCount,
     quality: settings.quality,
     duration: resolved?.duration,
   });
@@ -716,12 +716,13 @@ export default function NewClips() {
                 Shape the clip set
               </span>
             }
-            action={<Badge tone="neutral">{settings.clipCount} clip{settings.clipCount === 1 ? '' : 's'}</Badge>}
+            action={<Badge tone="neutral">{settings.clipCount === AUTO_CLIP_COUNT ? 'Auto' : `${settings.clipCount} clip${settings.clipCount === 1 ? '' : 's'}`}</Badge>}
           >
             <div className="settings-block">
               <div className="settings-three">
-                <Field label="Clip count" hint="1–10">
+                <Field label="Clip count" hint="Auto or 1–10">
                   <Select value={String(settings.clipCount)} onChange={(value) => update('clipCount', Number(value))}>
+                    <option value={AUTO_CLIP_COUNT}>Auto — every good moment</option>
                     {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
                       <option key={count} value={count}>
                         {count} clip{count === 1 ? '' : 's'}
@@ -899,7 +900,7 @@ export default function NewClips() {
               <div className="create-summary-row">
                 <span>Clips</span>
                 <strong>
-                  {settings.clipCount} × {settings.minDuration}–{settings.maxDuration}s
+                  {settings.clipCount === AUTO_CLIP_COUNT ? 'Auto' : settings.clipCount} × {settings.minDuration}–{settings.maxDuration}s
                 </strong>
               </div>
               <div className="create-summary-row">
@@ -942,7 +943,7 @@ export default function NewClips() {
                     ? 'Use the live recorder'
                     : submitting
                       ? 'Starting the engine…'
-                      : `Make ${settings.clipCount} clip${settings.clipCount === 1 ? '' : 's'}`}
+                      : `Make ${settings.clipCount === AUTO_CLIP_COUNT ? 'clips (auto)' : `${settings.clipCount} clip${settings.clipCount === 1 ? '' : 's'}`}`}
               </Button>
               <span className="create-cta-note">
                 <Check size={11} /> {titlePreview ? `“${titlePreview.slice(0, 42)}${titlePreview.length > 42 ? '…' : ''}”` : 'Everything runs locally'}

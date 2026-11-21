@@ -23,7 +23,7 @@ import {
   Zap,
 } from 'lucide-react';
 import type { AppSettings, AsrModelId, CaptionPresetId, HookStyleId, PlatformId } from '@shared/types';
-import { CAPTION_BY_ID, CAPTION_PRESETS, HOOK_STYLES } from '@shared/presets';
+import { AUTO_CLIP_COUNT, CAPTION_BY_ID, CAPTION_PRESETS, HOOK_STYLES } from '@shared/presets';
 import { PLATFORMS } from '@shared/platforms';
 import { api } from '@web/lib/api';
 import { bytes, plural } from '@web/lib/format';
@@ -314,7 +314,7 @@ export default function Settings() {
                 </span>
               </span>
             }
-            action={<Badge tone="neutral">{form.defaultClipCount} clips · {form.defaultAspect}</Badge>}
+            action={<Badge tone="neutral">{form.defaultClipCount === AUTO_CLIP_COUNT ? 'Auto clips' : `${form.defaultClipCount} clips`} · {form.defaultAspect}</Badge>}
           >
             <div className="settings-defaults">
               <Field label="Clips per project">
@@ -322,6 +322,7 @@ export default function Settings() {
                   value={String(form.defaultClipCount)}
                   onChange={(value) => set('defaultClipCount', Number(value))}
                 >
+                  <option value={AUTO_CLIP_COUNT}>Auto — every good moment</option>
                   {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
                     <option key={count} value={count}>
                       {count} clip{count === 1 ? '' : 's'}

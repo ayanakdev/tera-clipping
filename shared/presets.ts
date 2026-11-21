@@ -1,5 +1,10 @@
 import type { AppSettings, CaptionPresetId, ClipPresetVisual, HookStyleId, ReframeMode } from './types';
 
+/** clipCount sentinel meaning "let the analyzer keep every qualifying moment". */
+export const AUTO_CLIP_COUNT = 0;
+/** Safety ceiling for Auto mode so a long stream cannot render endlessly. */
+export const MAX_AUTO_CLIPS = 50;
+
 export const DEFAULT_SETTINGS: AppSettings = {
   defaultClipCount: 5,
   defaultMinDuration: 18,

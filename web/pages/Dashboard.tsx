@@ -19,6 +19,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import type { Campaign, LibraryClip, ProjectSummary, StudioStats, Submission } from '@shared/types';
+import { AUTO_CLIP_COUNT } from '@shared/presets';
 import { api, mediaUrl } from '@web/lib/api';
 import { bytes, clock, dateLabel, greeting, plural, timeAgo } from '@web/lib/format';
 import { useAsyncData } from '@web/lib/hooks';
@@ -214,7 +215,7 @@ export default function Dashboard() {
             <small> min</small>
           </div>
           <div className="ledger-note">
-            {settings ? `${settings.defaultClipCount} clips per source by default` : 'Clip length is up to you'}
+            {settings ? (settings.defaultClipCount === AUTO_CLIP_COUNT ? 'Auto clips per source by default' : `${settings.defaultClipCount} clips per source by default`) : 'Clip length is up to you'}
           </div>
         </div>
         <div className="ledger-item">

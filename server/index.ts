@@ -19,7 +19,7 @@ import type {
   Submission,
   SystemStatus,
 } from '../shared/types';
-import { ASPECT_SIZES, CAPTION_PRESETS, DEFAULT_SETTINGS, HOOK_STYLES } from '../shared/presets';
+import { ASPECT_SIZES, AUTO_CLIP_COUNT, CAPTION_PRESETS, DEFAULT_SETTINGS, HOOK_STYLES } from '../shared/presets';
 import { PLATFORMS, detectPlatform, guessSourceKind } from '../shared/platforms';
 import { CONFIG, PATHS, fromData, mediaUrl } from './config';
 import { bus } from './lib/events';
@@ -102,7 +102,7 @@ function cleanSettings(raw: unknown): Partial<ClipSettings> {
   const body = raw as Record<string, unknown>;
   const out: Partial<ClipSettings> = {};
   const count = number(body.clipCount);
-  if (count !== undefined) out.clipCount = Math.max(1, Math.min(10, Math.round(count)));
+  if (count !== undefined) out.clipCount = Math.max(AUTO_CLIP_COUNT, Math.min(10, Math.round(count)));
   const min = number(body.minDuration);
   if (min !== undefined) out.minDuration = Math.max(5, Math.min(180, Math.round(min)));
   const max = number(body.maxDuration);

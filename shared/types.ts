@@ -125,6 +125,7 @@ export interface ScoreParts {
   payoff?: number;
   audio?: number;
   chat?: number;
+  reaction?: number;
   novelty?: number;
 }
 
