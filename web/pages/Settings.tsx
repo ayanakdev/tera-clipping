@@ -44,7 +44,7 @@ import {
 import { ClipStagePreview, HookCard } from '@web/components/media';
 
 const COOKIE_BROWSERS = [
-  { value: '', label: 'No browser cookies' },
+  { value: '', label: 'Auto — try installed browsers' },
   { value: 'chrome', label: 'Chrome' },
   { value: 'edge', label: 'Edge' },
   { value: 'firefox', label: 'Firefox' },
@@ -638,7 +638,7 @@ export default function Settings() {
                   maxLength={12}
                 />
               </Field>
-              <Field label="Cookie browser" hint="Shown only if a source asks for sign-in">
+              <Field label="Cookie browser" hint="Auto retries with a signed-in browser if YouTube blocks a link">
                 <Select value={form.cookiesBrowser} onChange={(value) => set('cookiesBrowser', value)}>
                   {COOKIE_BROWSERS.map((option) => (
                     <option key={option.value || 'none'} value={option.value}>
@@ -657,7 +657,7 @@ export default function Settings() {
               </Field>
             </div>
             <p className="settings-note">
-              <Cookie size={12} /> Cookies stay on this laptop and are passed only to yt-dlp. Public videos need none.
+              <Cookie size={12} /> Cookies stay on this laptop and are passed only to yt-dlp. Public videos need none; when YouTube asks for a bot check, Auto borrows the session from an installed signed-in browser.
             </p>
           </Panel>
 

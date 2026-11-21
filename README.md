@@ -281,7 +281,7 @@ tools/                  Downloaded binaries and models (created at runtime)
 | **Production page says the UI has not been built** | Run `npm run build` before `npm start`. |
 | **Port 8484 is busy** | Stop the other TeraClip process, or set `PORT=8485` in `.env.local` for production. In dev, also update the proxy target in `vite.config.ts`. |
 | **Missing ffmpeg / yt-dlp / whisper / face tracker** | Settings → System health → Repair toolkit, or `npm run setup -- --force`. |
-| **yt-dlp says 403, login required, or the video is age-gated** | Settings → Cookies. Pick a browser or a Netscape-format `cookies.txt`, then retry. |
+| **yt-dlp says 403, login required, or the video is age-gated** | TeraClip automatically retries with cookies from any installed, signed-in browser when YouTube asks for a bot check. If that still fails, Settings → Cookies lets you pick a specific browser or a Netscape-format `cookies.txt`. |
 | **Whisper is slow on an 8 GB laptop** | Keep `base.en`; try `tiny.en` in Settings; leave `ASR_THREADS=0` (auto) or set it to your logical core count; close heavy apps. First run also downloads the model. |
 | **Rendering is slow or a hardware encoder glitches** | Settings → Render speed. `auto` uses Quick Sync / NVENC / AMF when the driver accepts it; switch to `cpu` for a predictable `libx264` encode. |
 | **Live recorder starts then reconnects repeatedly** | The channel may be private, region-locked or using a URL yt-dlp cannot keep alive. Try cookies, lower capture quality, and check the session log. |

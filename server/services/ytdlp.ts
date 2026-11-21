@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { AppSettings, PlatformId } from '../../shared/types';
 import { detectPlatform } from '../../shared/platforms';
 import { PATHS } from '../config';
 import { log } from '../lib/logger';
-import { runProcess } from '../lib/process';
+import { runProcess, type ProcessResult, type RunOptions } from '../lib/process';
 
 export interface ResolvedSource {
   url: string;
@@ -37,20 +38,156 @@ export class YtDlpError extends Error {
   }
 }
 
-function cookieArgs(settings: AppSettings): string[] {
-  const args: string[] = [];
-  if (settings.cookiesFile && fs.existsSync(settings.cookiesFile)) {
-    args.push('--cookies', settings.cookiesFile);
-  } else if (settings.cookiesBrowser) {
-    args.push('--cookies-from-browser', settings.cookiesBrowser);
+/**
+ * Browsers we can borrow a signed-in session from when YouTube demands a bot
+ * check. yt-dlp reads the cookie store locally; nothing is uploaded and the
+ * cookies only travel to the target site.
+ */
+const AUTO_COOKIE_BROWSERS = ['opera', 'firefox', 'edge', 'chrome', 'brave', 'vivaldi', 'chromium'];
+let workingCookieBrowser: string | null = null;
+
+function browserRoots(browser: string): string[] {
+  const home = os.homedir();
+  const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  switch (browser) {
+    case 'opera':
+      return [
+        path.join(roaming, 'Opera Software', 'Opera Stable'),
+        path.join(roaming, 'Opera Software', 'Opera GX Stable'),
+      ];
+    case 'firefox':
+      return [path.join(roaming, 'Mozilla', 'Firefox', 'Profiles')];
+    case 'edge':
+      return [path.join(local, 'Microsoft', 'Edge', 'User Data')];
+    case 'chrome':
+      return [path.join(local, 'Google', 'Chrome', 'User Data')];
+    case 'brave':
+      return [path.join(local, 'BraveSoftware', 'Brave-Browser', 'User Data')];
+    case 'vivaldi':
+      return [path.join(local, 'Vivaldi', 'User Data')];
+    case 'chromium':
+      return [path.join(local, 'Chromium', 'User Data')];
+    default:
+      return [];
   }
-  return args;
+}
+
+/** Only try browsers that are actually installed, least-locked first. */
+function browserCookieCandidates(): string[] {
+  const installed = AUTO_COOKIE_BROWSERS.filter((browser) =>
+    browserRoots(browser).some((root) => fs.existsSync(root)),
+  );
+  return installed.length ? installed : AUTO_COOKIE_BROWSERS;
+}
+
+function configuredCookieArgs(settings: AppSettings): string[] {
+  if (settings.cookiesFile && fs.existsSync(settings.cookiesFile)) {
+    return ['--cookies', settings.cookiesFile];
+  }
+  if (settings.cookiesBrowser) return ['--cookies-from-browser', settings.cookiesBrowser];
+  return [];
+}
+
+function looksLikeAuthBlock(stderr: string): boolean {
+  const text = stderr.toLowerCase();
+  return (
+    (text.includes('confirm you') && text.includes('not a bot')) ||
+    text.includes('sign in to confirm') ||
+    text.includes('login required') ||
+    text.includes('use --cookies') ||
+    text.includes('cookies for the authentication') ||
+    text.includes('age-restricted') ||
+    text.includes('age restricted') ||
+    text.includes('members-only')
+  );
+}
+
+function looksLikeCookieSourceError(stderr: string): boolean {
+  const text = stderr.toLowerCase();
+  return (
+    text.includes('failed to decrypt') ||
+    text.includes('could not copy') ||
+    text.includes('could not find') ||
+    text.includes('failed to extract') ||
+    text.includes('cookie database') ||
+    text.includes('permission denied')
+  );
+}
+
+/**
+ * Run yt-dlp with the configured cookies. If none are configured and YouTube
+ * answers with a bot check, retry with cookies from each installed browser
+ * until one has a usable signed-in session. The winner is remembered for the
+ * rest of the process so later downloads do not repeat the probe.
+ */
+async function runYtdlp(
+  url: string,
+  settings: AppSettings,
+  args: string[],
+  opts: RunOptions,
+): Promise<ProcessResult> {
+  const explicit = configuredCookieArgs(settings);
+  const isYoutube = detectPlatform(url) === 'youtube';
+  const tried = new Set<string>();
+  let cookieArgs: string[];
+  if (explicit.length) {
+    cookieArgs = explicit;
+  } else if (isYoutube && workingCookieBrowser) {
+    cookieArgs = ['--cookies-from-browser', workingCookieBrowser];
+    tried.add(workingCookieBrowser);
+  } else {
+    cookieArgs = [];
+  }
+
+  let result = await runProcess(PATHS.ytdlp, [...args, ...cookieArgs], opts);
+  if (result.code === 0 || explicit.length || !isYoutube) return result;
+  if (opts.signal?.aborted) return result;
+  if (!looksLikeAuthBlock(result.stderr)) return result;
+  if (workingCookieBrowser && tried.has(workingCookieBrowser)) workingCookieBrowser = null;
+
+  for (const browser of browserCookieCandidates()) {
+    if (tried.has(browser)) continue;
+    tried.add(browser);
+    if (opts.signal?.aborted) return result;
+    const retry = await runProcess(PATHS.ytdlp, [...args, '--cookies-from-browser', browser], opts);
+    if (retry.code === 0) {
+      workingCookieBrowser = browser;
+      log.info(`yt-dlp: YouTube blocked the signed-out request; using ${browser} cookies`);
+      return retry;
+    }
+    if (!looksLikeAuthBlock(retry.stderr) && !looksLikeCookieSourceError(retry.stderr)) {
+      // The session got past the bot check but the video itself failed
+      // (private/geo/etc). Surface the true reason instead of the bot check.
+      return retry;
+    }
+  }
+  return result;
+}
+
+function stripCookieNoise(raw: string): string {
+  return raw
+    .split('\n')
+    .filter((line) => !/extracting cookies from|extracted \d+ cookies/i.test(line))
+    .join('\n');
 }
 
 export function friendlyYtdlpError(raw: string, platform: PlatformId): string {
-  const text = raw.toLowerCase();
+  const text = stripCookieNoise(raw).toLowerCase();
+  if (text.includes('could not copy') && text.includes('cookie database')) {
+    return 'The browser is open, so its cookies cannot be read. Close it, or choose another browser in Settings → Platform access.';
+  }
+  if (text.includes('failed to decrypt') && text.includes('dpapi')) {
+    return "Windows blocked reading that browser's cookies. Choose another browser or a cookies.txt file in Settings → Platform access.";
+  }
+  if (text.includes('could not find') && text.includes('cookies database')) {
+    return 'That browser has no cookie store on this PC. Choose another browser in Settings → Platform access.';
+  }
+  if (text.includes('failed to extract') && text.includes('cookies')) {
+    return "That browser's cookies could not be read. Close the browser or choose another one in Settings → Platform access.";
+  }
   if (text.includes('confirm you') && text.includes('not a bot')) {
-    return 'YouTube asked for a freshness check. Add browser cookies in Settings → Platform access, then retry.';
+    return 'YouTube still asked for a bot check. Sign in to YouTube in an installed browser (or add cookies in Settings → Platform access), then retry.';
   }
   if (text.includes('sign in') || text.includes('login required') || text.includes('cookies')) {
     return 'This post needs an account session. Add cookies in Settings → Platform access and retry.';
@@ -92,11 +229,10 @@ export async function resolveSource(
     '20',
     '--retries',
     '2',
-    ...cookieArgs(settings),
     '-J',
     url,
   ];
-  const result = await runProcess(PATHS.ytdlp, args, {
+  const result = await runYtdlp(url, settings, args, {
     signal,
     throwOnError: false,
     timeoutMs: 120_000,
@@ -173,12 +309,11 @@ export async function downloadSource(
     'mp4',
     '--ffmpeg-location',
     ffmpegDir,
-    ...cookieArgs(settings),
   ];
   const args = [...baseArgs, '-f', format, '-o', template, url];
   const run = async (withFormat: boolean) => {
     const runArgs = withFormat ? args : [...baseArgs, '-f', 'b', '-o', template, url];
-    return runProcess(PATHS.ytdlp, runArgs, {
+    return runYtdlp(url, settings, runArgs, {
       signal: opts.signal,
       throwOnError: false,
       label: 'download',
@@ -195,7 +330,7 @@ export async function downloadSource(
   };
 
   let result = await run(true);
-  if (result.code !== 0) {
+  if (result.code !== 0 && !looksLikeAuthBlock(result.stderr)) {
     log.warn('yt-dlp preferred format failed, trying generic best', result.stderr.slice(-500));
     result = await run(false);
   }
@@ -262,19 +397,10 @@ export async function resolveLiveStream(
   const format = maxHeight
     ? `b${ceiling}[protocol^=m3u8]/b${ceiling}/b[protocol^=m3u8]/b`
     : 'b[protocol^=m3u8]/b';
-  const result = await runProcess(
-    PATHS.ytdlp,
-    [
-      '--no-warnings',
-      '--no-playlist',
-      '--socket-timeout',
-      '20',
-      ...cookieArgs(settings),
-      '-f',
-      format,
-      '-g',
-      url,
-    ],
+  const result = await runYtdlp(
+    url,
+    settings,
+    ['--no-warnings', '--no-playlist', '--socket-timeout', '20', '-f', format, '-g', url],
     { signal, throwOnError: false, timeoutMs: 90_000, maxBuffer: 4 * 1024 * 1024, label: 'live resolve' },
   );
   if (result.code !== 0) {

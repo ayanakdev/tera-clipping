@@ -16,6 +16,7 @@ import type {
   ClipSettings,
   LibraryClip,
   PlatformId,
+  SourceKind,
   Submission,
   SystemStatus,
 } from '../shared/types';
@@ -449,6 +450,13 @@ function registerRoutes(app: FastifyInstance): void {
   });
   app.post('/api/system/cleanup', async () => cleanupStorage());
 
+  /** A /live or /watch link that yt-dlp reports as finished is a VOD, not a live channel. */
+  const resolvedSourceKind = (url: string, platform: PlatformId, isLive: boolean): SourceKind => {
+    if (isLive) return 'live';
+    const guessed = guessSourceKind(url, platform);
+    return guessed === 'live' ? 'vod' : guessed;
+  };
+
   app.post('/api/import/resolve', async (request) => {
     const url = normalizeUrl((request.body as { url?: unknown })?.url);
     const info = await asHttp(() => resolveSource(url, store.getSettings()));
@@ -466,8 +474,8 @@ function registerRoutes(app: FastifyInstance): void {
       width: info.width,
       height: info.height,
       description: info.description,
-      kind: guessSourceKind(url, platform),
-      sourceKind: info.isLive ? 'live' : guessSourceKind(url, platform),
+      kind: resolvedSourceKind(url, platform, info.isLive),
+      sourceKind: resolvedSourceKind(url, platform, info.isLive),
       previewUrl: mediaUrl(undefined),
     };
   });
@@ -482,7 +490,7 @@ function registerRoutes(app: FastifyInstance): void {
       title: typeof body.title === 'string' ? body.title : info.title,
       channel: info.channel,
       platform,
-      sourceKind: info.isLive ? 'live' : guessSourceKind(url, platform),
+      sourceKind: resolvedSourceKind(url, platform, info.isLive),
       sourceUrl: url,
       externalId: info.id,
       previewUrl: info.thumbnail,
